@@ -1,0 +1,41 @@
+# Upstream simulators are cloned, not vendored. See README / setup.sh
+third_party/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Data + model checkpoints (re-downloadable)
+data/
+checkpoints/
+*.th
+*.pt
+*.pth
+
+# Generated outputs — regenerate with experiments/run_all.py
+results/*.json
+figures/*.pdf
+figures/*.png
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.toc
+*.nav
+*.snm
+*.vrb
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

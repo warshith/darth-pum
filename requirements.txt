@@ -1,0 +1,22 @@
+# Core
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+pandas>=2.0
+pyyaml>=6.0
+
+# ResNet-20 / CIFAR-10 and the LLM encoder.
+# CPU wheels by default; re-install with the CUDA index URL on a GPU machine.
+torch>=2.2
+torchvision>=0.17
+
+# LLM encoder: I-BERT integer-only softmax / GELU / LayerNorm reference
+transformers>=4.40
+
+# AES reference implementation for cross-checking against NIST vectors
+pycryptodome>=3.20
+
+# Tests
+pytest>=8.0
+
+# NOTE: CrossSim is NOT on PyPI. setup.sh installs it from third_party/cross-sim.
