@@ -14,8 +14,7 @@ from darthpum.device import ACEParams, ADCParams
 def test_sar_tile_count_matches_paper():
     """[DARTH] Section 6: 1860 HCTs with SAR ADCs.
 
-    We get 1844. A sub-1% gap is well inside the rounding of the published
-    component areas, so the model is reproducing the paper.
+    We get 1844, within 1%.
     """
     n = hct_count(ace=ACEParams(adc=ADCParams.sar()))
     assert n == pytest.approx(1860, rel=0.02), (
