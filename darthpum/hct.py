@@ -119,13 +119,19 @@ class HybridComputeTile:
         input_bits: int = 8,
         output_bits: int | None = None,
         value_bits: int = 8,
+        active_row_fraction: float = 1.0,
     ) -> HCTCost:
         """A full bit-sliced matrix-vector multiply across both domains.
 
         The analog side produces one partial product per input bit-slice; the
         digital side shifts each into position and accumulates them.
+
+        `active_row_fraction`: forwarded to AnalogComputeElement.mvm_cost --
+        the zero-skipping contribution. 1.0 (default) leaves this call
+        identical to every other workload's.
         """
-        mvm_cost = self.ace.mvm_cost(rows, cols, input_bits, output_bits, value_bits)
+        mvm_cost = self.ace.mvm_cost(rows, cols, input_bits, output_bits, value_bits,
+                                     active_row_fraction=active_row_fraction)
         out_bits = mvm_cost.output_bits
         elements = min(cols, self.ace.p.array.cols)
 

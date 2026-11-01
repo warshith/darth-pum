@@ -61,26 +61,22 @@ class LayerCost:
 
 
 def layer_cost(m: LayerMapping, tile: HybridComputeTile,
-               reduction: str = "tree") -> LayerCost:
+               reduction: str = "tree", active_row_fraction: float = 1.0) -> LayerCost:
     """Cost of one conv/fc layer, run once per output spatial position.
 
-    Pass the FULL (unsliced) weight_rows/weight_cols straight to
-    AnalogComputeElement.mvm_cost -- it already computes the correct array
-    footprint (row-tiles x col-tiles x bit-slices) and the resulting wave count
-    if that exceeds one ACE's 64-array capacity. An earlier version pre-sliced
-    to a single <=64-row tile and charged that cost once, silently DROPPING the
-    other row-tiles' MVM passes entirely for any layer wider than 64 rows --
-    caught by checking per-layer cycle counts against a rough hand calculation
-    before trusting the full-network total.
+    Passes the full (unsliced) weight_rows/weight_cols straight to
+    AnalogComputeElement.mvm_cost, which computes the array footprint
+    (row-tiles x col-tiles x bit-slices) and the resulting wave count if that
+    exceeds one ACE's 64-array capacity.
 
-    What mvm_cost does NOT do is charge for recombining the row-tile partial
-    sums (different row-tiles cover different reduction-dimension slices of the
-    SAME output, so their results must be added) and the bit-sliced weight
-    partial products (different bit-slices must be shifted and added, the same
-    shift-and-add pattern the HCT's coordination layer implements for input
-    bit-slicing -- see hct.py). Column-tiles need no recombination: different
-    column-tiles are different, independent output channels. That digital
-    accumulation is added here explicitly.
+    mvm_cost does not charge for recombining the row-tile partial sums
+    (different row-tiles cover different reduction-dimension slices of the
+    same output, so their results must be added) or the bit-sliced weight
+    partial products (different bit-slices must be shifted and added, the
+    same shift-and-add pattern the HCT's coordination layer implements for
+    input bit-slicing -- see hct.py). Column-tiles need no recombination:
+    different column-tiles are different, independent output channels. That
+    digital accumulation is added here.
 
     `reduction` picks how the partial sums are combined:
       "tree"   (default) -- pairwise tree reduction, ceil(log2(n)) SEQUENTIAL
@@ -88,11 +84,10 @@ def layer_cost(m: LayerMapping, tile: HybridComputeTile,
                 so, in principle, pipelineable). This is what any reasonable
                 hardware/compiler would do, not an optimistic stretch.
       "serial" -- naive sequential chain, n-1 dependent additions. A clearly
-                worse upper bound, kept only as a documented sensitivity check
-                -- an initial version used this by accident and it dominated
-                layer cost by ~94%, which is implausible for a reduction this
-                shallow and was the signal something was being modelled too
-                pessimistically.
+                worse upper bound, kept only as a documented sensitivity check.
+
+    `active_row_fraction`: zero-skipping (see sparsity.py). Forwarded to
+    tile.mvm -- 1.0 (default) leaves this layer's cost unchanged.
     """
     row_tiles = -(-m.weight_rows // 64)
     bit_slices = -(-VALUE_BITS // CELL_BITS)
@@ -100,6 +95,7 @@ def layer_cost(m: LayerMapping, tile: HybridComputeTile,
     mvm = tile.mvm(
         rows=m.weight_rows, cols=m.weight_cols,
         input_bits=INPUT_BITS, output_bits=OUTPUT_BITS, value_bits=VALUE_BITS,
+        active_row_fraction=active_row_fraction,
     )
 
     positions = m.out_shape[-1] * m.out_shape[-2] if m.kind == "conv" else 1
@@ -154,19 +150,35 @@ def inference_cost(
     tile: HybridComputeTile | None = None,
     ace_params: ACEParams | None = None,
     reduction: str = "tree",
+    zero_skip: bool = False,
 ) -> tuple[list[LayerCost], list[LayerCost]]:
     """Full-network cost: (per-layer MVM costs, per-layer non-MVM costs).
 
     Every conv layer except the network's very last one is followed by BN+ReLU;
     the second conv of every BasicBlock additionally gets a residual add before
     its ReLU (the standard post-activation ResNet design this architecture uses).
+
+    `zero_skip`: the zero-skipping contribution. When True, each layer's
+    wordline drivers are disabled in proportion to its MEASURED input
+    activation sparsity (sparsity.py -- real zeros, counted on real CIFAR-10
+    images through our own checkpoint, not an assumed textbook rate),
+    reducing analog energy with no change to cycles or accuracy. False
+    (default) reproduces every number computed before this contribution
+    existed.
     """
     tile = tile or HybridComputeTile(ace_params)
     mappings = map_resnet20(value_bits=VALUE_BITS, ace=tile.ace)
 
+    skip_fractions = {}
+    if zero_skip:
+        from .sparsity import layer_skip_fractions
+        skip_fractions = layer_skip_fractions()
+
     mvm_costs, nonmvm_costs = [], []
     for i, m in enumerate(mappings):
-        mvm_costs.append(layer_cost(m, tile, reduction=reduction))
+        active_fraction = 1.0 - skip_fractions.get(m.name, 0.0)
+        mvm_costs.append(layer_cost(m, tile, reduction=reduction,
+                                    active_row_fraction=active_fraction))
 
         if m.kind == "fc":
             continue  # no BN/ReLU after the final classifier

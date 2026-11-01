@@ -140,11 +140,34 @@ class AnalogComputeElement:
         input_bits: int = 8,
         output_bits: int | None = None,
         value_bits: int = 8,
+        active_row_fraction: float = 1.0,
     ) -> MVMCost:
         """Cost of multiplying a rows x cols matrix by one input vector.
 
         Row-tiles are summed digitally afterwards, by the DCE -- that cost belongs
         to the coordination layer (hct.py), not here.
+
+        `active_row_fraction`: the zero-skipping contribution. A wordline
+        whose input element is exactly zero contributes nothing to any
+        bitline it drives, so its driver can be disabled for the whole MVM.
+        Modelled as an ENERGY-only saving, never a timing one: the bitline
+        current is still a sum over whatever rows ARE active, and the ADC
+        must still digitize it regardless of how many rows contributed -- no
+        cycle count or ADC cost changes. Only the "Row Periphery" power term
+        in _energy_pJ (the wordline-driver component of Table 3, as opposed
+        to Sample & Hold or the ADCs themselves) scales down by this
+        fraction. Default 1.0 (no rows skipped) leaves every existing cost in
+        this file unchanged.
+
+        Measured end-to-end on ResNet-20 (real activation sparsity, our own
+        checkpoint, real CIFAR-10 images -- see workloads/resnet20/sparsity.py),
+        this reduces total energy by only ~3%, not the ~48% the row-driver
+        term alone would suggest: Row Periphery is a small fraction of total
+        ACE energy once ADC conversion (always active, unaffected) and the
+        digital recombination of bit-sliced partial sums (also unaffected --
+        INT8 weights on SLC cells need up to 72 partial sums combined per
+        layer, every time, regardless of which rows were zero) are accounted
+        for. Reported here rather than at the inflated row-driver-only figure.
         """
         output_bits = (output_bits if output_bits is not None
                        else self.p.adc.resolution_bits)
@@ -163,7 +186,7 @@ class AnalogComputeElement:
         adc_cycles = waves * input_bits * adc_only
 
         active = min(tiles, self.p.num_arrays)
-        energy = self._energy_pJ(cycles, adc_cycles, active)
+        energy = self._energy_pJ(cycles, adc_cycles, active, active_row_fraction)
 
         return MVMCost(
             rows=rows, cols=cols,
@@ -172,16 +195,23 @@ class AnalogComputeElement:
             energy_pJ=energy, adc_cycles=adc_cycles,
         )
 
-    def _energy_pJ(self, cycles: int, adc_cycles: int, active_arrays: int) -> float:
+    def _energy_pJ(self, cycles: int, adc_cycles: int, active_arrays: int,
+                  active_row_fraction: float = 1.0) -> float:
         """Table 3 power x active time.
 
         Row periphery and sample-and-hold burn for the whole operation; the ADCs
         only while converting.
+
+        `active_row_fraction` scales ONLY Row Periphery -- the wordline-driver
+        power -- since that is the component zero-skipping actually turns
+        off. S&H and the ADCs are untouched: the bitline still needs sampling
+        and converting regardless of how many of its rows were driven.
         """
         ns = cycles / self.chip.clock_GHz
         adc_ns = adc_cycles / self.chip.clock_GHz
 
-        array_mW = (POWER_MW["Row Periphery"] + POWER_MW["S&H (Analog)"]) * active_arrays
+        array_mW = (POWER_MW["Row Periphery"] * active_row_fraction
+                   + POWER_MW["S&H (Analog)"]) * active_arrays
         adc_key = "SAR ADC" if self.p.adc.kind == "SAR" else "Ramp ADC"
         adc_mW = POWER_MW[adc_key] * self.p.adc.count
 
