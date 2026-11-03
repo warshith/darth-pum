@@ -68,6 +68,7 @@ workloads/      ResNet-20 mapped onto the architecture
 baselines/      the CPU + analog-accelerator comparison point
 contribution/   the two extensions above
 experiments/    figure-generation scripts
+results/        baseline and contribution graphs/tables, standalone
 tests/          correctness and reproduction checks
 paper/          IEEE-format report
 ```
