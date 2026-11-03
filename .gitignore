@@ -20,6 +20,13 @@ results/*.json
 figures/*.pdf
 figures/*.png
 
+# paper/: track report.tex, IEEEtran.cls, and figs/*.pdf as source.
+# Everything else here is build output or submission packaging, not source.
+paper/*.pdf
+paper/*.zip
+paper/template_src/
+paper/darth-pum-latex-source/
+
 # LaTeX build artifacts
 *.aux
 *.log
