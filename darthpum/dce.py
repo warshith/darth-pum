@@ -1,43 +1,30 @@
 """Digital Compute Element: RACER bit-pipelined Boolean PUM.
 
-Data layout
------------
-A DCE holds 64 independent bit-pipelines, each 64 arrays deep, every array 64x64.
-Within one pipeline ([RACER] Section 4, [DARTH] Figure 5):
+Layout first, since it's easy to get backwards. A DCE is 64 independent
+bit-pipelines, each 64 arrays deep, arrays are 64x64. Inside one pipeline
+([RACER] Sec. 4, [DARTH] Fig. 5): array i holds bit position i of every value
+(values get bit-striped down the pipeline, so depth == max operand width, 64
+bits here); the 64 rows of an array are 64 vector elements, so a pipeline
+works on a 64-wide vector at once; the 64 columns are 64 separate vector
+registers. So one pipeline = 64 registers x 64 elements x up to 64 bits, times
+64 pipelines per DCE.
 
-  * array i holds **bit position i** of every value -- values are bit-striped
-    across the depth of the pipeline, so pipeline depth is the maximum operand
-    width (64 bits here);
-  * the 64 **rows** of an array are 64 different vector elements, so one pipeline
-    operates on a 64-element vector at once;
-  * the 64 **columns** are 64 distinct vector registers.
+Timing: every array can run a different micro-op each cycle -- that's what
+makes it bit-*pipelined*, not bit-serial. For a recipe that's R cycles long
+(see recipes.py for where R comes from) on a W-bit operand:
 
-So one pipeline stores 64 vector registers x 64 elements x up to 64 bits, and a
-DCE has 64 such pipelines.
+  initiation interval = R        (array 0 frees up after R cycles)
+  latency = W*R + scan-chain fill (bit i+1 needs bit i's carry, so it's serial)
 
-Timing
-------
-Each array can execute a different micro-op each cycle, which is what makes the
-design bit-*pipelined* rather than merely bit-serial. For an op whose recipe is
-R cycles long (from the OSCAR recipe book -- see recipes.py) applied to a W-bit
-operand:
+This distinction actually matters a lot -- a workload that's issuing lots of
+independent ops cares about II, not latency, and that's basically the whole
+throughput story of this architecture. Mix the two up and you'll understate
+digital PUM by ~64x (the operand width) without realizing it.
 
-  * **initiation interval = R.** Array 0 is free again after R cycles, so a new
-    operation can start every R cycles.
-  * **latency = W * R + scan-chain fill.** Bit i+1 depends on bit i (carry
-    propagation), so the bit positions proceed in sequence down the pipeline.
-
-The distinction matters: a workload issuing many independent vector operations is
-limited by the initiation interval, not the latency, and that is precisely the
-throughput advantage the architecture is built around. Code that conflates the two
-will understate digital PUM by roughly the operand width -- a factor of 64 here.
-
-Energy
-------
-Charged from the Table 3 power figures multiplied by active time, which is how the
-paper's own numbers are expressed. `switching_energy_pJ` independently estimates
-the same quantity from device physics ([RACER] Table 1, 0.0128 pJ per transition)
-as a cross-check; the two should agree to order of magnitude.
+Energy comes from Table 3 power x active time, same as the paper does it.
+switching_energy_pJ is a separate bottom-up estimate from device physics
+([RACER] Table 1: 0.0128 pJ/transition), kept around as a sanity check -- the
+two numbers should land in the same ballpark, not match exactly.
 """
 
 from __future__ import annotations
@@ -77,31 +64,28 @@ class DigitalComputeElement:
         self.chip = chip or ChipParams()
         self.recipes = recipes.load()
 
-    # -- capacity -------------------------------------------------------
+    # capacity
 
     @property
     def elements_per_pipeline(self) -> int:
-        """Vector elements processed in parallel by one pipeline = array rows."""
+        """= array rows: that's how many vector elements one pipeline handles at once."""
         return self.p.array.rows
 
     @property
     def max_elements(self) -> int:
-        """Elements in flight across the whole DCE."""
         return self.p.num_pipelines * self.elements_per_pipeline
 
     @property
     def max_width_bits(self) -> int:
-        """Widest operand: one bit per array down the pipeline."""
+        """one bit per array down the pipeline, so depth caps the operand width"""
         return self.p.pipeline_depth
 
-    # -- cost -----------------------------------------------------------
+    # cost model
 
     def op_cost(self, op: str, width_bits: int = 8, elements: int = 64) -> OpCost:
         """Cost of applying `op` to `elements` values of `width_bits` each.
-
-        Elements beyond what the DCE holds at once are processed in successive
-        batches, which multiplies the latency.
-        """
+        Anything over what the DCE holds at once just queues into another
+        batch, multiplying the latency."""
         if width_bits > self.max_width_bits:
             raise ValueError(
                 f"{width_bits}-bit operand exceeds pipeline depth "
@@ -124,11 +108,9 @@ class DigitalComputeElement:
         return OpCost(op, width_bits, elements, latency, ii, energy)
 
     def _energy_pJ(self, cycles: int, pipelines_busy: int) -> float:
-        """Table 3 power x active time.
-
-        'Array (Bool Ops)' and 'Pipeline Ctrl' are per-pipeline figures; only the
-        pipelines actually holding data are charged.
-        """
+        """Table 3 power x active time. 'Array (Bool Ops)' and 'Pipeline Ctrl'
+        are per-pipeline numbers, so only pipelines that actually hold data get
+        charged for them."""
         ns = cycles / self.chip.clock_GHz
         mW = (POWER_MW["Array (Bool Ops)"] + POWER_MW["Pipeline Ctrl"]) * pipelines_busy
         return mW * 1e-3 * ns * 1e3  # mW*ns = nJ*1e-3 -> pJ
@@ -136,36 +118,30 @@ class DigitalComputeElement:
     def switching_energy_pJ(
         self, op: str, width_bits: int = 8, elements: int = 64
     ) -> float:
-        """Independent bottom-up energy estimate, as a cross-check on _energy_pJ.
+        """Bottom-up cross-check on _energy_pJ: count only the micro-ops that
+        actually drive current (Boolean/transfer, not control) and charge
+        device switching energy for each cell touched.
 
-        Counts micro-ops that actually drive current (Boolean and transfer ops,
-        not pipeline control) and charges each cell they switch, across every
-        element touched.
-
-        This lands roughly 20x *below* the Table 3 estimate, and the gap is
-        expected rather than an error: it counts only dynamic switching, whereas
-        the Table 3 figures are whole-element active power. Most of that
-        difference is the bit-pipeline control logic, which [DARTH] Table 3 puts
-        at 74000 um^2 per DCE -- by far the largest component -- and which
-        [RACER] Table 4 measures at 677 uW static against 775 uW dynamic, i.e.
-        nearly half its power is leakage that burns whether or not devices
-        switch. Dynamic switching energy alone therefore understates the real
-        cost badly, which is why the Table 3 figures are what we report.
+        Comes out ~20x below the Table 3 number, which is expected, not a bug
+        -- this only counts dynamic switching, while Table 3 is whole-element
+        active power. The gap is mostly the pipeline control logic, 74000 um^2
+        per DCE ([DARTH] Table 3, the single biggest line item), and [RACER]
+        Table 4 shows that logic is nearly half static leakage (677 uW static
+        vs 775 uW dynamic) that burns regardless of switching. So dynamic
+        switching alone badly undercounts the real cost, which is why Table 3
+        is what we actually report everywhere.
         """
         rec = self.recipes[op]
         return (rec.switching_uops * width_bits * elements
                 * DEVICE.switch_energy_pJ)
 
-    # -- convenience ----------------------------------------------------
+    # convenience wrappers
 
     def sequence_cost(
         self, ops: list[tuple[str, int, int]]
     ) -> tuple[int, float]:
-        """Cost of a dependent chain of operations: (cycles, pJ).
-
-        Dependent, so latencies add -- no overlap. Independent work should be
-        costed with the initiation interval instead.
-        """
+        """Cost of a dependent chain of ops -> (cycles, pJ). Latencies just add
+        since nothing overlaps; for independent ops use the II instead."""
         cycles = 0
         energy = 0.0
         for op, width, elements in ops:

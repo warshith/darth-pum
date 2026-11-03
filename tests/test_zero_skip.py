@@ -1,12 +1,12 @@
-"""Zero-skipping: real measured activation sparsity reducing ACE row-driver
-energy -- a modest, honestly-measured energy contribution.
+"""Zero-skipping: real measured activation sparsity cutting ACE row-driver
+energy. Modest, but honestly measured.
 
-The headline risk this module guards against is the mirror image of the ADC
-contribution's: a naive back-of-envelope estimate (51% average activation
-sparsity -> expect roughly 48% row-driver energy savings) looks far larger
-than what the full network actually realizes (~3%), because ADC conversion
-and digital partial-sum recombination -- both unaffected by which rows were
-zero -- dominate total ACE energy. These tests pin the real, diluted number.
+Main thing these tests guard against: a naive back-of-envelope take (51%
+average sparsity -> ~48% row-driver savings, sounds great) is way bigger than
+what the real network delivers end to end (~3%), because ADC conversion and
+digital partial-sum recombination dominate ACE energy and don't care at all
+which rows were zero. So the tests below pin the real, diluted number, not
+the inflated one.
 """
 
 import pytest
@@ -22,15 +22,15 @@ def tile():
     return HybridComputeTile()
 
 
-# -- the measurement itself ------------------------------------------------
+# the measurement itself
 
 def test_measured_sparsity_is_real_not_a_textbook_guess():
-    """19 ReLU sites, each a genuine measured fraction in [0, 1] -- not a
-    single assumed constant repeated for every layer."""
+    """19 ReLU sites, each a genuinely measured fraction, not one assumed
+    constant copy-pasted across every layer."""
     assert len(MEASURED_SPARSITY) == 19
     assert all(0.0 <= s <= 1.0 for s in MEASURED_SPARSITY)
-    # Real per-layer variation, not a flat assumed rate -- the whole point of
-    # measuring rather than assuming "CNNs are ~50% sparse" as one constant.
+    # real per-layer spread, not a flat rate -- that's the whole point of
+    # measuring instead of just assuming "CNNs are ~50% sparse"
     assert max(MEASURED_SPARSITY) - min(MEASURED_SPARSITY) > 0.3
 
 
@@ -40,20 +40,20 @@ def test_measured_mean_matches_what_was_reported():
 
 
 def test_layer_skip_fractions_cover_every_mapping_layer(tile):
-    """Every one of mapping.py's 20 layers must get an entry -- conv1 (the
-    stem, consuming the raw image) explicitly at 0.0, not missing."""
+    """Every one of mapping.py's 20 layers needs an entry here, including
+    conv1 (explicitly 0.0 -- it eats the raw image, not missing by accident)."""
     names = [m.name for m in map_resnet20(ace=tile.ace)]
     fractions = layer_skip_fractions()
     assert set(fractions) == set(names)
     assert fractions[names[0]] == 0.0  # conv1: dense image input, no skip
 
 
-# -- the mechanism: cycles unchanged, energy reduced proportionally --------
+# the mechanism itself: cycles unchanged, energy down proportionally
 
 def test_zero_skip_never_changes_cycles(tile):
-    """Energy-only contribution: skipping a wordline's driver cannot change
-    how many cycles the MVM takes, since the ADC still has to convert the
-    bitline regardless of which rows drove it."""
+    """Energy-only contribution -- skipping a wordline driver can't touch
+    cycle count, since the ADC still converts the bitline no matter which
+    rows actually drove it."""
     base_mvm, base_nonmvm = inference_cost(tile, zero_skip=False)
     skip_mvm, skip_nonmvm = inference_cost(tile, zero_skip=True)
     base_cycles = sum(c.cycles for c in base_mvm + base_nonmvm)
@@ -69,15 +69,15 @@ def test_zero_skip_reduces_energy(tile):
     assert skip_energy < base_energy
 
 
-# -- the honest, diluted end-to-end number ----------------------------------
+# the honest, diluted end-to-end number
 
 def test_end_to_end_reduction_is_small_not_the_naive_51_percent_estimate():
-    """The headline risk: a naive reading of 51% average sparsity would
-    suggest roughly 48% energy savings (since Row Periphery is ~94% of a
-    single MVM's energy in isolation). The real, network-wide number is
-    much smaller once ADC conversion and bit-slice recombination -- both
-    completely unaffected by row-skipping -- are accounted for. Pinned here
-    so a future change can't silently let the inflated estimate back in."""
+    """The thing we're actually worried about: naively reading 51% average
+    sparsity suggests ~48% energy savings (Row Periphery is ~94% of one
+    isolated MVM's energy). The real network-wide number is much smaller once
+    ADC conversion and bit-slice recombination -- both untouched by
+    row-skipping -- are in the picture. Pinned here so a future change can't
+    quietly let the inflated estimate creep back in."""
     tile = HybridComputeTile()
     base_mvm, base_nonmvm = inference_cost(tile, zero_skip=False)
     skip_mvm, skip_nonmvm = inference_cost(tile, zero_skip=True)
@@ -95,24 +95,23 @@ def test_end_to_end_reduction_is_small_not_the_naive_51_percent_estimate():
 
 
 def test_accumulate_energy_is_the_dominant_untouched_cost(tile):
-    """Why the reduction is small: for a wide layer, the DIGITAL cost of
-    recombining bit-sliced partial sums (untouched by row-skipping) should
-    dominate over the ANALOG MVM cost (which row-skipping does reduce)."""
+    """Why the reduction stays small: for a wide layer, the digital cost of
+    recombining bit-sliced partial sums (row-skipping can't touch it) should
+    dominate over the analog MVM cost (which it does reduce)."""
     m = next(m for m in map_resnet20(ace=tile.ace) if m.name == "r3.0.conv2")
     full = layer_cost(m, tile, active_row_fraction=1.0)
     half = layer_cost(m, tile, active_row_fraction=0.5)
-    # Energy drops with more skipping, but not by anywhere near 50%, because
-    # accumulate_energy (unaffected) is the majority of this layer's cost.
+    # drops with more skipping, but nowhere near 50% -- accumulate_energy
+    # (untouched) is most of this layer's cost
     reduction = 1 - half.energy_pJ / full.energy_pJ
     assert 0 < reduction < 0.25
 
 
-# -- interface sanity --------------------------------------------------------
+# interface sanity
 
 def test_active_row_fraction_defaults_to_no_skip(tile):
-    """Every call site elsewhere in the project omits active_row_fraction --
-    it must default to 1.0 (no skipping), reproducing every number computed
-    before this contribution existed."""
+    """Every other call site in the project omits active_row_fraction, so it
+    has to default to 1.0 (no skip) or every pre-existing number changes."""
     m = next(m for m in map_resnet20(ace=tile.ace) if m.name == "fc")
     default = layer_cost(m, tile)
     explicit = layer_cost(m, tile, active_row_fraction=1.0)
@@ -121,9 +120,9 @@ def test_active_row_fraction_defaults_to_no_skip(tile):
 
 
 def test_zero_skip_false_matches_pre_contribution_numbers(tile):
-    """zero_skip=False (the default) must reproduce the exact energy figure
-    every other committed ResNet-20 result in this project was computed
-    against, so this contribution cannot silently change prior results."""
+    """zero_skip=False has to reproduce the exact energy figure every other
+    committed ResNet-20 result in this project was computed against -- this
+    contribution can't be allowed to silently shift prior results."""
     mvm_costs, nonmvm_costs = inference_cost(tile, zero_skip=False)
     total_energy = sum(c.energy_pJ for c in mvm_costs + nonmvm_costs)
     assert total_energy == pytest.approx(726_837_072, rel=1e-6)

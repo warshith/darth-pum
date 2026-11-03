@@ -1,5 +1,5 @@
-"""Figure generation: catches the kind of mistake that matters most here --
-plotting a number that doesn't match what the investigation actually reported.
+"""Mostly guards against the dumbest failure mode: a figure plotting a
+number that silently drifted from what we actually measured elsewhere.
 """
 
 import matplotlib
@@ -35,8 +35,7 @@ def test_oscar_crosscheck_matches_the_parsed_add_recipe():
 
 
 def test_all_figures_are_written(tmp_path, monkeypatch):
-    """A smoke test that every figure function runs end-to-end and writes a
-    PDF for the report."""
+    """Smoke test -- every figure function runs end to end and actually writes a PDF."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "paper" / "figs").mkdir(parents=True)
 
@@ -58,9 +57,9 @@ def test_all_figures_are_written(tmp_path, monkeypatch):
 
 
 def test_submission_folders_get_the_right_figures(tmp_path, monkeypatch):
-    """results/baseline/ and results/contribution/ are their own deliverable
-    per the assignment brief, so each must hold the figures that back its
-    claims, not just whatever happened to be generated."""
+    """results/baseline/ and results/contribution/ get uploaded separately per
+    the brief, so they'd better each hold the right figures and not just
+    whatever was lying around."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "paper" / "figs").mkdir(parents=True)
 

@@ -1,24 +1,23 @@
-"""Shared plotting style: one consistent look across every figure in the
-report. Every figure script imports from here rather than repeating style
-setup, so a single change updates every plot at once.
+"""Shared plotting style so we don't re-style every figure from scratch.
+Every figure script imports from here -- change a color once, every plot in
+the report picks it up.
 
-Colors are a validated, colorblind-safe categorical set (CVD Delta-E >= 8,
-normal-vision Delta-E >= 15 between any two slots actually used together
-here), not picked by eye.
+Picked these colors off a colorblind-safe generator rather than eyeballing
+them (CVD Delta-E >= 8, normal-vision Delta-E >= 15 between slots we actually
+put next to each other).
 """
 
 import matplotlib.pyplot as plt
 
-# -- validated categorical slots (light-surface set) ------------------------
-BLUE = "#2a78d6"      # the headline / "ours" result
-ORANGE = "#eb6834"    # a contrasting second series
-GREEN = "#008300"     # a validated / correct-as-expected result
-NEUTRAL = "#aeada4"   # reference / "paper" bars -- deliberately recessive
+# categorical slots, light surface
+BLUE = "#2a78d6"      # headline / "ours" result
+ORANGE = "#eb6834"    # contrasting second series
+GREEN = "#008300"     # validated / as-expected result
+NEUTRAL = "#aeada4"   # reference / "paper" bars, kept deliberately dull
 
-# an ordinal light->dark ramp of BLUE, for 1/2/4 bits-per-cell (low to high)
+# light->dark ramp of BLUE for 1/2/4 bits-per-cell
 BLUE_RAMP = ["#6da7ec", "#2a78d6", "#184f95"]
 
-# chart chrome
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 INK_MUTED = "#898781"
@@ -64,15 +63,14 @@ def setup():
 
 
 def save(fig, name: str, outdir: str = "paper/figs"):
-    """Save a PDF for \\includegraphics in the report."""
+    """Dump a PDF straight into paper/figs for \\includegraphics."""
     fig.savefig(f"{outdir}/{name}.pdf")
     plt.close(fig)
     print(f"  wrote {outdir}/{name}.pdf")
 
 
 def bar_value_labels(ax, bars, fmt="{:.1f}", fontsize=9, color=None):
-    """Put the numeric value on top of each bar -- direct labels beat a
-    reader having to read the value off the axis."""
+    """Number on top of each bar -- easier to just read it off than squint at the axis."""
     for b in bars:
         h = b.get_height()
         ax.annotate(fmt.format(h), xy=(b.get_x() + b.get_width() / 2, h),

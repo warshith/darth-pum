@@ -1,10 +1,9 @@
-"""The precision tradeoff contribution: throughput scaling vs. measured accuracy
-cost as cells-per-array store more bits.
+"""Precision tradeoff: throughput scaling vs. measured accuracy cost as each
+analog cell stores more bits.
 
-Unlike the zero-skipping contribution, this effect should NOT be diluted --
-every layer's array footprint shrinks by the same factor regardless of what
-else the network is doing, so the full throughput gain should reach the
-chip-wide number. These tests check that directly.
+Main thing to check: unlike zero-skipping, this gain shouldn't get diluted --
+every layer's footprint shrinks by the same factor no matter what else is
+going on, so the full tile-count ratio should show up at the chip level too.
 """
 
 import pytest
@@ -24,8 +23,8 @@ def test_sweep_covers_all_three_cell_bit_settings(points):
 
 
 def test_more_bits_per_cell_needs_fewer_tiles(points):
-    """Doubling bits/cell should roughly halve the array footprint, since
-    tiles_for_matrix divides by cell_bits directly."""
+    # doubling bits/cell should roughly halve tile count, since
+    # tiles_for_matrix just divides by cell_bits
     tiles = {p.cell_bits: p.tiles_per_instance for p in points}
     assert tiles[2] < tiles[1]
     assert tiles[4] < tiles[2]
@@ -38,37 +37,34 @@ def test_throughput_increases_with_bits_per_cell(points):
 
 
 def test_throughput_gain_is_not_diluted(points):
-    """The headline risk this contribution avoided, unlike zero-skipping: the
-    full tile-count ratio should show up almost exactly in chip throughput,
-    since nothing else in the pipeline depends on cell_bits. 2 bits/cell
-    should be close to a full 2x, not diluted down to a few percent."""
+    # this is the thing that makes this contribution worth picking over a
+    # weaker one -- 2 bits/cell should land near a full 2x, not get chewed
+    # down to a few percent the way zero-skip's energy number did
     base = next(p for p in points if p.cell_bits == 1)
     two_bit = next(p for p in points if p.cell_bits == 2)
     speedup = two_bit.chip_throughput_per_s / base.chip_throughput_per_s
     assert speedup > 1.5, (
-        f"2-bit/cell speedup {speedup:.2f}x is much smaller than expected -- "
-        "if this effect is being diluted the way zero-skip's energy saving "
-        "was, that would undermine the reason this contribution was chosen"
+        f"2-bit/cell speedup only {speedup:.2f}x -- looks diluted, which "
+        "would undermine the whole point of this contribution"
     )
 
 
 def test_accuracy_decreases_with_bits_per_cell():
-    """More levels per cell means harder-to-distinguish states and more
-    programming error -- accuracy must fall monotonically."""
+    # more levels per cell = harder to tell apart = more programming error.
+    # should fall monotonically, no exceptions
     assert MEASURED_ACCURACY_PCT[1] > MEASURED_ACCURACY_PCT[2] > MEASURED_ACCURACY_PCT[4]
 
 
 def test_slc_accuracy_is_close_to_the_papers_own_slc_result():
-    """cell_bits=1 here must match the SLC accuracy measured elsewhere in this
-    project (workloads/resnet20/accuracy.py) -- both come from the identical
-    CrossSim configuration, so they should agree closely, not just coincide
-    in spirit."""
+    # cell_bits=1 here is the same CrossSim config as the paper's own SLC
+    # number elsewhere in the project (workloads/resnet20/accuracy.py), so
+    # these shouldn't just be in the same ballpark, they should basically match
     assert MEASURED_ACCURACY_PCT[1] == pytest.approx(83.43, abs=0.5)
 
 
 def test_four_bit_accuracy_cost_is_large_not_negligible():
-    """The honest finding: packing more bits per cell is not a free lunch.
-    The drop from 1-bit to 4-bit should be large enough that no one could
-    mistake this for an unqualified win."""
+    # honest finding here: more bits/cell is not a free lunch. make sure the
+    # 1-bit -> 4-bit drop is big enough that nobody reads this as a win with
+    # no downside
     drop = MEASURED_ACCURACY_PCT[1] - MEASURED_ACCURACY_PCT[4]
     assert drop > 15.0

@@ -12,16 +12,12 @@ def ace():
     return AnalogComputeElement()
 
 
-# -- functional ---------------------------------------------------------
+# functional correctness
 
 def test_bitsliced_mvm_equals_direct_product(ace):
-    """Input bit-slicing must be exactly equivalent to the plain product.
-
-    This is the load-bearing correctness check for the analog dataflow: the
-    hardware applies one input bit per cycle and recombines by shifting, and if
-    our understanding of that is wrong, every analog result is wrong. Exact
-    integer equality, no tolerance.
-    """
+    """This is THE load-bearing check for the analog dataflow -- if bit-sliced
+    reconstruction doesn't match the plain product exactly, every analog
+    number downstream is wrong. No tolerance, exact integers only."""
     rng = np.random.default_rng(0)
     for _ in range(20):
         m = rng.integers(0, 16, size=(64, 64))
@@ -30,8 +26,8 @@ def test_bitsliced_mvm_equals_direct_product(ace):
 
 
 def test_bitsliced_mvm_truncates_when_given_too_few_input_bits(ace):
-    """Slicing n bits of a wider input must drop the high bits, not silently
-    produce the full answer -- otherwise the model would hide precision loss."""
+    """Slicing fewer bits than the input has should drop the high bits, not
+    quietly give the full answer anyway (that would hide real precision loss)."""
     m = np.ones((4, 4), dtype=np.int64)
     v = np.array([255, 0, 0, 0])
     got = ace.mvm_bitsliced(m, v, input_bits=4)     # keeps only the low nibble
@@ -43,10 +39,10 @@ def test_mvm_rejects_shape_mismatch(ace):
         ace.mvm(np.ones((4, 8)), np.ones(4))
 
 
-# -- mapping ------------------------------------------------------------
+# mapping
 
 def test_tile_count_follows_the_isaac_puma_formula(ace):
-    """ceil(rows/64) * ceil(cols/64) * ceil(value_bits/cell_bits)."""
+    # ceil(rows/64) * ceil(cols/64) * ceil(value_bits/cell_bits)
     assert ace.tiles_for_matrix(64, 64, value_bits=1) == 1
     assert ace.tiles_for_matrix(64, 64, value_bits=8) == 8     # 8 bit-slices, SLC
     assert ace.tiles_for_matrix(128, 64, value_bits=1) == 2    # two row-tiles
@@ -54,19 +50,20 @@ def test_tile_count_follows_the_isaac_puma_formula(ace):
 
 
 def test_resnet20_largest_layer_fits_one_ace():
-    """ResNet-20's widest im2col matrix is 576x64 (layer3 3x3, 64->64 channels).
-    In SLC that is 9 arrays, well inside one ACE's 64 -- which is why the whole
-    network maps onto a couple of tiles and throughput comes from replication."""
+    """ResNet-20's widest im2col matrix is 576x64 (the 3x3, 64->64 layer3
+    convs). SLC -> 9 arrays, nowhere near one ACE's 64, which is exactly why
+    the network maps onto a couple of tiles and gets its throughput from
+    replication instead of needing to split any single layer."""
     ace = AnalogComputeElement()
     assert ace.tiles_for_matrix(576, 64, value_bits=1) == 9
     assert ace.fits(576, 64, value_bits=1)
 
 
-# -- the ADC trade-off --------------------------------------------------
+# the ADC trade-off
 
 def test_sar_cost_is_independent_of_required_precision():
-    """SAR converts one bitline at a time by binary search, so its cost is set by
-    bitline count, not by how many output bits are wanted."""
+    """SAR is binary search, one bitline at a time -- cost tracks bitline
+    count, not how many output bits you asked for."""
     ace = AnalogComputeElement(ACEParams(adc=ADCParams.sar()))
     assert (ace.adc_cycles_per_slice(2)
             == ace.adc_cycles_per_slice(8)
@@ -74,21 +71,19 @@ def test_sar_cost_is_independent_of_required_precision():
 
 
 def test_ramp_cost_grows_exponentially_with_precision():
-    """A ramp sweeps 2^bits reference increments, so precision costs dearly --
-    but it can stop early when only a few output bits are actually needed."""
+    """Ramp sweeps 2^bits increments so precision gets expensive fast, but it
+    can bail out early when fewer output bits are actually needed."""
     ace = AnalogComputeElement(ACEParams(adc=ADCParams.ramp()))
     assert ace.adc_cycles_per_slice(2) == 4
     assert ace.adc_cycles_per_slice(4) == 16
     assert ace.adc_cycles_per_slice(8) == 256
-    # Never worse than a full-resolution sweep.
-    assert ace.adc_cycles_per_slice(16) == 256
+    assert ace.adc_cycles_per_slice(16) == 256  # never worse than a full sweep
 
 
 def test_converter_crossover_matches_the_paper():
-    """[DARTH] Section 7.3 reports that SAR wins overall, except on kernels needing
-    very few output bits, where ramp's early termination wins instead. Our
-    model must reproduce that reversal.
-    """
+    """[DARTH] Sec 7.3: SAR wins overall, except kernels that only need a few
+    output bits, where ramp's early-termination flips it. Model has to show
+    that same reversal, not just pick one winner."""
     sar = AnalogComputeElement(ACEParams(adc=ADCParams.sar()))
     ramp = AnalogComputeElement(ACEParams(adc=ADCParams.ramp()))
 
@@ -105,15 +100,16 @@ def test_converter_crossover_matches_the_paper():
 
 
 def test_conversion_dominates_analog_cost(ace):
-    """[DARTH] Section 2.2.1 and 7.3: ADCs are the bottleneck of analog PUM.
-    If conversion were a small fraction, the ADC study would be pointless."""
+    """ADCs are the real bottleneck in analog PUM ([DARTH] 2.2.1, 7.3) -- if
+    conversion were only a small slice of the cost, the whole ADC comparison
+    wouldn't matter."""
     c = ace.mvm_cost(64, 64, input_bits=8, output_bits=8, value_bits=1)
     assert c.adc_fraction > 0.9
 
 
 def test_more_arrays_than_an_ace_holds_forces_extra_waves(ace):
-    """A matrix needing more arrays than the ACE has must be processed in
-    successive waves, costing proportionally more."""
+    """Needing more arrays than one ACE has means extra sequential waves,
+    costing proportionally more."""
     one = ace.mvm_cost(64, 64, value_bits=1).cycles
     over = ace.mvm_cost(64 * 65, 64, value_bits=1).cycles   # 65 tiles > 64 arrays
     assert over == 2 * one

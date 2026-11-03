@@ -1,36 +1,33 @@
-"""Contribution: how many bits per analog cell should ResNet-20 use?
+"""How many bits per analog cell should ResNet-20 actually use?
 
-The paper only evaluates ResNet-20 in SLC mode (one bit per cell). Storing
-more bits per cell needs fewer physical arrays for the same matrix, since
-fewer bit-slices are required -- which means more copies of the network fit
-on the chip and throughput goes up. The cost is that a cell holding more
-distinguishable levels is harder to program precisely, so accuracy goes down.
-This module measures that tradeoff directly instead of assuming SLC is the
-only reasonable choice.
+The paper only runs ResNet-20 in SLC mode (1 bit/cell). Push more bits into
+each cell and you need fewer physical arrays for the same matrix -- fewer
+bit-slices -- so more copies of the network fit on the chip and throughput
+climbs. Tradeoff: a cell with more distinguishable levels is harder to
+program accurately, so accuracy drops. Wanted to actually measure this
+instead of just assuming SLC was the right call.
 
-Throughput side: darthpum.device.ACEParams already exposes cell_bits, and
-AnalogComputeElement.tiles_for_matrix divides by it directly, so every piece
-needed already exists and is tested -- this module only runs the sweep.
+Throughput side was easy -- ACEParams already has cell_bits and
+tiles_for_matrix divides by it, so this file just runs the sweep over the
+three settings.
 
-Accuracy side: measured with the same CrossSim pipeline used for the paper's
-own SLC accuracy result (workloads/resnet20/accuracy.py), varying weight_bits
-and Nslices so the resulting cell_bits matches the throughput side exactly
-(weight_bits=8, Nslices=8/4/2 gives cell_bits=1/2/4).
+Accuracy side reuses the exact CrossSim pipeline from the paper's own SLC
+number (see workloads/resnet20/accuracy.py), just sweeping weight_bits /
+Nslices so cell_bits lines up with the throughput side: Nslices 8/4/2 ->
+cell_bits 1/2/4 (weight_bits pinned at 8 throughout).
 
-Results, full 10,000-image CIFAR-10 test set, our verified checkpoint:
+Numbers, full 10k CIFAR-10 test set, our checkpoint:
 
     cell_bits   tiles/instance   chip throughput     accuracy
     1 (SLC)     13               10364.7 inf/s       83.43%
     2            7               19453.5 inf/s (1.88x)   70.68%  (-12.8pp)
     4            4               34099.1 inf/s (3.29x)   53.84%  (-29.6pp)
 
-Unlike the zero-skipping contribution, this effect is NOT diluted by other
-kernels: every layer's tile footprint shrinks by the same factor, so the
-throughput gain reaches the whole-network number intact. The honest finding
-is the other direction -- the accuracy cost is real and sizeable, so SLC is
-not an obviously suboptimal choice the paper left on the table; it's a
-reasonable point on a tradeoff curve that gets considerably worse in both
-directions past it.
+Unlike zero-skipping, this one doesn't get diluted -- every layer shrinks by
+the same cell_bits factor so the gain shows up almost untouched at the chip
+level. The honest catch is on the accuracy side: the drop is real and not
+small, so SLC isn't some obviously-left-on-the-table mistake, it's a
+reasonable spot on a curve that gets worse fast in both directions.
 """
 
 from __future__ import annotations
@@ -39,14 +36,14 @@ from dataclasses import dataclass
 
 CELL_BITS_SWEPT = (1, 2, 4)
 
-# weight_bits is fixed at 8 (INT8, matching every other result in this
-# project); Nslices divides it into that many cell_bits-wide slices.
+# weight_bits stays at 8 (INT8, same as everywhere else here); Nslices just
+# chops that into cell_bits-wide slices.
 NSLICES_FOR_CELL_BITS = {1: 8, 2: 4, 4: 2}
 
+# full 10k CIFAR-10 test set, RRAMMilo noise, SAR ADC -- same config as the
+# paper's SLC number. regenerate with measure_accuracy() if these ever need
+# re-checking (takes a while, see the docstring there)
 MEASURED_ACCURACY_PCT = {1: 83.43, 2: 70.68, 4: 53.84}
-"""Full 10,000-image CIFAR-10 test set, RRAMMilo noise, SAR ADC -- the same
-configuration as the paper's own SLC accuracy result. Regenerate with
-measure_accuracy()."""
 
 
 @dataclass(frozen=True)
@@ -58,7 +55,8 @@ class PrecisionPoint:
 
 
 def throughput_sweep() -> list[PrecisionPoint]:
-    """Tiles/instance and chip-wide throughput at each cell_bits setting."""
+    """Runs the chip model once per cell_bits setting and collects tiles/
+    instance + throughput for each."""
     from darthpum.chip import Chip, Workload
     from darthpum.device import ACEParams
     from darthpum.hct import HybridComputeTile
@@ -85,9 +83,9 @@ def throughput_sweep() -> list[PrecisionPoint]:
 
 def measure_accuracy(cell_bits: int, n_images: int = 10_000,
                      batch_size: int = 200) -> float:
-    """Regenerate one entry of MEASURED_ACCURACY_PCT from scratch. Requires
-    torch/CrossSim, the checkpoint, and the CIFAR-10 test set. Takes several
-    minutes at n_images=10000."""
+    # redoes one entry of MEASURED_ACCURACY_PCT from scratch -- needs torch,
+    # CrossSim and the checkpoint on disk. full 10k run takes a few minutes,
+    # don't call this in a loop
     from simulator.algorithms.dnn.torch.convert import convertible_modules, from_torch
 
     from workloads.resnet20.accuracy import CHECKPOINT, _device_params, evaluate

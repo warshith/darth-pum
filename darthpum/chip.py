@@ -1,34 +1,31 @@
-"""Chip-level model: many hybrid tiles, scheduling, and throughput.
+"""Chip-level model: lots of hybrid tiles, scheduling between them, throughput.
 
-Everything below the tile level produces *latency*. Throughput is a chip-level
-property, and it is what the paper actually reports, so this is the module that
-turns the rest of the simulator into comparable numbers.
+Everything in hct.py gives you *latency* for one tile doing one thing. The
+numbers the paper actually reports are chip-level throughput, so this module
+is what turns "how long does one HCT take" into something comparable.
 
-How throughput arises
----------------------
-An iso-area DARTH-PUM chip holds ~1844 tiles (area.py). A workload instance -- one
-ResNet-20 inference -- occupies some number of tiles for some number of cycles.
-Throughput then comes from running many instances side by side:
+Roughly: an iso-area DARTH-PUM chip holds ~1844 tiles (area.py). A workload
+instance (say, one ResNet-20 inference) occupies some tiles for some cycles.
+Run a bunch of instances side by side and throughput falls out:
 
     instances in parallel = tiles available / tiles per instance
     throughput            = instances in parallel / latency per instance
 
-This is why footprint matters as much as speed. ResNet-20's largest layer needs 9
-of an ACE's 64 arrays, so the whole network fits in a couple of tiles and the chip
-runs ~900 inferences concurrently. A workload that needed 500 tiles per instance
-would get 3, however fast each one was. [DARTH] Section 7.1 makes exactly this
-argument about AppAccel: it spends so much area on special-function units that it
-runs fewer inferences in parallel, and DARTH-PUM makes up the per-instance gap on
-density alone.
+Footprint matters as much as raw speed because of this. ResNet-20's biggest
+layer only needs 9 of an ACE's 64 arrays, so the whole network fits in a
+couple of tiles and the chip runs ~900 inferences at once. A workload needing
+500 tiles per instance would only get 3 running in parallel, however fast each
+one was -- which is more or less [DARTH] Section 7.1's argument against
+AppAccel: it spends area on special-function units, so it runs fewer
+instances in parallel, and DARTH-PUM makes that gap back on density alone.
 
-Thermal limits
---------------
-Area is not the only budget. Resistive memory draws real current when it switches,
-and a chip cannot run every array at once. MASTODON's own configurations carry
-`watt_thermal_limit=80`, and [DARTH] Section 6 notes the DigitalPUM comparison
-point runs "two pipelines active per cluster to stay within thermal limits" -- a
-32x derate on a 64-pipeline element. Ignoring this would flatter every digital
-configuration enormously, so the cap is modelled explicitly and reported.
+Area isn't the only budget though. ReRAM pulls real current when it switches
+and a chip can't just fire every array at once. MASTODON's shipped configs
+carry watt_thermal_limit=80, and Section 6 of the paper notes the DigitalPUM
+comparison point only runs "two pipelines active per cluster to stay within
+thermal limits" -- a 32x derate on a 64-pipeline element. Skipping this would
+make every digital configuration look better than it should, so the cap is
+modelled explicitly here instead of assumed away.
 """
 
 from __future__ import annotations
@@ -40,16 +37,15 @@ from .area import chip_capacity_GB, hct_count
 from .device import ACEParams, ChipParams, DCEParams
 from .hct import HybridComputeTile
 
-DEFAULT_THERMAL_LIMIT_W = 80.0
-"""From MASTODON's shipped configurations (`watt_thermal_limit=80`)."""
+DEFAULT_THERMAL_LIMIT_W = 80.0  # MASTODON's shipped configs: watt_thermal_limit=80
 
 
 @dataclass
 class Workload:
     """One instance of an application, costed on a single tile.
 
-    `work_units` lets throughput be reported in the units the paper uses -- for
-    ResNet-20 that is inferences.
+    work_units exists so throughput can be reported in whatever unit the
+    paper uses for that workload -- inferences for ResNet-20, etc.
     """
 
     name: str
@@ -58,8 +54,7 @@ class Workload:
     energy_pJ_per_instance: float
     work_units: float = 1.0
     unit: str = "instances"
-    breakdown: dict[str, int] = field(default_factory=dict)
-    """Optional per-kernel cycle counts, for Figure 14-style charts."""
+    breakdown: dict[str, int] = field(default_factory=dict)  # per-kernel cycles, for Fig-14-style charts
 
     def __post_init__(self):
         if self.tiles_per_instance < 1:
@@ -118,8 +113,6 @@ class Chip:
             self.ace_params, self.dce_params, self.p, optimized=optimized
         )
 
-    # -- budgets --------------------------------------------------------
-
     @property
     def tiles(self) -> int:
         """Tiles fitting the iso-area die budget."""
@@ -128,8 +121,6 @@ class Chip:
     @property
     def capacity_GB(self) -> float:
         return chip_capacity_GB(self.dce_params, self.ace_params, self.p)
-
-    # -- evaluation -----------------------------------------------------
 
     def run(self, w: Workload) -> ChipResult:
         """Throughput, energy and power for a workload on this chip."""
@@ -143,7 +134,7 @@ class Chip:
         wanted = self.tiles // w.tiles_per_instance
         seconds = w.cycles_per_instance / (self.p.clock_GHz * 1e9)
 
-        # Power if every instance ran concurrently.
+        # power if every copy ran at the same time
         watts_each = (w.energy_pJ_per_instance * 1e-12) / seconds
         full_power = wanted * watts_each
 
@@ -166,16 +157,14 @@ class Chip:
             unit=w.unit,
         )
 
-    # -- comparison -----------------------------------------------------
-
     @staticmethod
     def speedup(result: ChipResult, baseline: ChipResult) -> float:
-        """Throughput of `result` relative to `baseline` -- the paper's metric."""
+        """Throughput of `result` relative to `baseline`, the paper's metric."""
         return result.throughput_per_s / baseline.throughput_per_s
 
     @staticmethod
     def energy_saving(result: ChipResult, baseline: ChipResult) -> float:
-        """Energy reduction factor, reported the paper's way (higher is better)."""
+        """Energy reduction factor, reported the paper's way (bigger = better)."""
         return baseline.energy_pJ_per_unit / result.energy_pJ_per_unit
 
     @staticmethod
@@ -197,7 +186,7 @@ if __name__ == "__main__":
 
     print()
     chip = Chip()
-    # A placeholder workload until the real ones land -- one 64x64 MVM per tile.
+    # placeholder workload until the real ones are wired in -- one 64x64 MVM/tile
     cost = chip.tile.mvm(64, 64, input_bits=8, value_bits=1)
     w = Workload(
         name="single-MVM",

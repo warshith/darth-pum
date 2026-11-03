@@ -1,5 +1,5 @@
-"""The ResNet-20 Baseline: capacity vs latency, round-trip granularity, and the
-calibrated reproduction of the paper's own ratios."""
+"""Baseline tests: capacity vs latency, round-trip granularity, and whether
+the calibrated model actually reproduces the paper's ratios."""
 
 import pytest
 
@@ -27,12 +27,12 @@ def darthpum_numbers(tile):
     return r.throughput_per_s, total_cycles / 1000  # (img/s, latency us)
 
 
-# -- the accelerator-capacity bug (first attempt: zero parallelism) --------
+# -- accelerator capacity (first pass treated this as one image at a time) --
 
 def test_accelerator_holds_thousands_of_parallel_copies(tile):
-    """A 1.5 GB accelerator and a 269K-parameter (784-array) network must
-    support real parallelism -- treating it as one-image-at-a-time (a first
-    attempt's mistake) made the Baseline absurdly slow (73.5 img/s)."""
+    """A 1.5 GB accelerator running a 269K-param (784-array) network should
+    obviously run way more than one image at a time -- first draft didn't,
+    and the Baseline came out at a laughable 73.5 img/s."""
     b = ResNet20Baseline(tile=tile)
     assert b.accelerator_parallel_capacity() > 1000
 
@@ -43,14 +43,13 @@ def test_accelerator_capacity_scales_with_accelerator_size(tile):
     assert large > small
 
 
-# -- the round-trip granularity fix -----------------------------------------
+# -- round-trip granularity --------------------------------------------------
 
 def test_roundtrips_counted_per_array_not_per_layer(tile):
-    """One round trip per physical array (row-tile x bit-slice combination),
-    not one per layer -- a first attempt used per-layer round trips and needed
-    an implausible ~444 us/round-trip to explain the paper's latency ratio;
-    the array-level granularity needs only ~11 us, an ordinary order of
-    magnitude for OS-mediated device I/O."""
+    """Round trips are per physical array (row-tile x bit-slice), not per
+    layer. Per-layer needed an implausible ~444 us/round-trip to match the
+    paper's latency ratio; per-array only needs ~11 us, which is a normal
+    number for device I/O."""
     b = ResNet20Baseline(tile=tile)
     total_roundtrips = sum(b.roundtrips_per_layer(m) for m in b.mappings)
     assert total_roundtrips == 784          # one per physical array
@@ -58,19 +57,19 @@ def test_roundtrips_counted_per_array_not_per_layer(tile):
 
 
 def test_each_layers_roundtrip_count_matches_its_array_footprint(tile):
-    """roundtrips_per_layer and LayerMapping.tiles both count physical arrays
-    the same way -- they must agree for every layer, not just in total."""
+    """roundtrips_per_layer and LayerMapping.tiles count arrays the same way
+    -- should agree per layer, not just in the total."""
     b = ResNet20Baseline(tile=tile)
     for m in b.mappings:
         assert b.roundtrips_per_layer(m) == m.tiles
 
 
-# -- capacity vs latency are genuinely different quantities -----------------
+# -- capacity and latency are not the same thing -----------------------------
 
 def test_latency_uses_one_core_capacity_uses_all(tile):
-    """A single image's own critical path runs on one core (no benefit from
-    others); THROUGHPUT scales across cores since images are independent, so
-    many images can pipeline behind each other's round trips."""
+    """One image's critical path runs on a single core regardless of how many
+    you have. Throughput does scale with cores since images don't depend on
+    each other."""
     b2 = ResNet20Baseline(tile=tile, cores=2)
     b8 = ResNet20Baseline(tile=tile, cores=8)
     assert b2.run().single_inference_latency_us == pytest.approx(
@@ -80,9 +79,9 @@ def test_latency_uses_one_core_capacity_uses_all(tile):
 
 
 def test_bandwidth_capacity_is_shared_across_concurrent_images(tile):
-    """Bandwidth is a THROUGHPUT ceiling (aggregate bytes/s across every
-    in-flight image), not a per-image latency term -- halving the link must
-    halve the bandwidth-derived capacity."""
+    """Bandwidth caps throughput (aggregate bytes/s across every in-flight
+    image), it's not a per-image latency thing -- so halving the link should
+    just halve this capacity."""
     fast = ResNet20Baseline(tile=tile, link_GB_per_s=50.0)
     slow = ResNet20Baseline(tile=tile, link_GB_per_s=25.0)
     assert slow.transfer_bandwidth_capacity_images_per_s() == pytest.approx(
@@ -90,7 +89,7 @@ def test_bandwidth_capacity_is_shared_across_concurrent_images(tile):
     )
 
 
-# -- the calibrated reproduction --------------------------------------------
+# -- calibrated reproduction --------------------------------------------------
 
 def test_calibrated_model_reproduces_the_papers_throughput_ratio(tile, darthpum_numbers):
     dp_throughput, _ = darthpum_numbers
@@ -109,24 +108,23 @@ def test_calibrated_model_reproduces_the_papers_latency_ratio(tile, darthpum_num
 
 
 def test_calibrated_round_trip_latency_is_ordinary():
-    """The intellectual-honesty check this whole calibration rests on: the
-    value must be ordinary, not a number that only works because it was
-    forced. 11.3 us is squarely in the range for normal, non-kernel-bypass
-    OS-mediated device I/O -- not a negligible latency and not an absurdly
-    large one."""
+    """This is really the whole point of calibrating against two ratios at
+    once -- the resulting number has to be a normal one, not something that
+    only "matches" because it was forced there. 11.3 us is a completely
+    ordinary round trip for device I/O."""
     round_trip_us = CALIBRATED_ROUND_TRIP_NS / 1000
     assert 1.0 < round_trip_us < 100.0
 
 
 def test_calibrated_bandwidth_is_a_plausible_real_interconnect():
-    """4.2 GB/s should land in normal PCIe/USB-class territory, not an
-    absurdly fast or slow value that only 'works' because it was forced."""
+    """Same idea -- 4.2 GB/s should sit in normal PCIe/USB territory, not
+    some absurd value that only works because it was forced to."""
     assert 0.5 < CALIBRATED_LINK_GB_PER_S < 50
 
 
 def test_uncalibrated_and_calibrated_give_different_answers(tile, darthpum_numbers):
-    """Sanity: the two configurations must not coincidentally agree -- if they
-    did, the calibration would not be doing anything."""
+    """If these two configs happened to agree, the calibration wouldn't
+    actually be doing anything."""
     dp_throughput, _ = darthpum_numbers
     uncal = ResNet20Baseline(tile=tile)
     cal = ResNet20Baseline(tile=tile, round_trip_latency_ns=CALIBRATED_ROUND_TRIP_NS,

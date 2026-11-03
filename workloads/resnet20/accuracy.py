@@ -1,35 +1,32 @@
 """ResNet-20 accuracy under DARTH-PUM's analog non-idealities, via CrossSim.
 
-[DARTH] Section 7.5 reports an end-to-end accuracy of 75.4% for ResNet-20 on
-CIFAR-10 in SLC (1 bit/cell) mode, against the ~91.7% fp32 accuracy of the same
-network. This module reproduces that comparison using CrossSim (the same
-analog accuracy simulator the paper itself uses) applied to our own,
-independently-verified model and checkpoint -- NOT CrossSim's bundled example
-ResNet-20 (which uses option-B/1x1-conv-downsample shortcuts, a different
-architecture from the option-A variant that matches [DARTH] Figure 15's exact
-20-layer bar count and that every other result in this project is built on).
-Switching architectures mid-project would make this accuracy number
-inconsistent with the throughput/latency results already computed elsewhere.
+[DARTH] 7.5 reports 75.4% end-to-end for ResNet-20/CIFAR-10 in SLC (1
+bit/cell) mode, vs ~91.7% fp32. This reproduces that comparison with CrossSim
+(same simulator the paper uses) on our own verified model/checkpoint, NOT
+CrossSim's bundled example ResNet-20. That example uses option-B shortcuts
+(1x1 conv downsample), a different architecture from the option-A variant
+that actually matches Figure 15's 20-bar layout and that everything else in
+this project is built on -- mixing the two would make this accuracy number
+inconsistent with the throughput/latency numbers computed elsewhere.
 
-Configuration, matched to the rest of this project where possible:
-  - weight_bits=8, Nslices=8  -> cell_bits=1 (SLC), matching VALUE_BITS/CELL_BITS
-    used throughout resnet_pum.py and the mapping.
-  - error_model="RRAMMilo"    -> the device noise model [DARTH] Section 6 cites
-    (V. Milo et al., IRPS 2021), already implemented in CrossSim.
-  - adc_type="sar"            -> SAR converters, the paper's default config
-    for all results except the explicit SAR-vs-ramp study (Section 7.3).
+Config, matched to the rest of the project:
+  - weight_bits=8, Nslices=8 -> cell_bits=1 (SLC), same as VALUE_BITS/CELL_BITS
+    everywhere else in resnet_pum.py and the mapping code.
+  - error_model="RRAMMilo" -> the device noise model [DARTH] Sec 6 cites
+    (Milo et al., IRPS 2021), already in CrossSim.
+  - adc_type="sar" -> matches the paper's default everywhere except the
+    explicit SAR-vs-ramp comparison in 7.3.
 
-Scope limitation, stated plainly: input/ADC range CALIBRATION (the per-layer
-.npy files CrossSim's own example ships) exists only for CrossSim's bundled
-model, not ours -- generating it properly needs a profiling pass this
-project's timeline does not allow for. Input and ADC quantisation are
-therefore left at full precision (input_bits=0, adc_bits=0) here, isolating
-the effect this script DOES measure -- RReRAM weight-storage programming noise,
-the headline source of error the paper's own SLC number is about -- from
-quantisation effects it does not. This is a stated idealisation, not a hidden
-one; it likely means our noisy accuracy comes out somewhat HIGHER than the
-paper's 75.4% (less total noise modelled), which is the expected direction of
-the gap given the idealisation and not the opposite.
+One real limitation worth flagging: proper input/ADC range calibration (the
+per-layer .npy files CrossSim's own example ships with) only exists for
+CrossSim's bundled model, not ours, and generating it properly needs a
+profiling pass we didn't have time for. So input/ADC quantisation is left at
+full precision here (input_bits=0, adc_bits=0), which isolates the thing we
+actually care about measuring -- ReRAM weight-storage programming noise, the
+source of error the paper's 75.4% is really about -- from quantisation noise
+we aren't modelling. Net effect: our noisy accuracy probably comes out a bit
+HIGHER than 75.4% since we're modelling less total noise, which is the
+direction you'd expect given this, not a sign something's wrong.
 """
 
 from __future__ import annotations
@@ -87,10 +84,10 @@ def _device_params(weight_bits: int = 8, Nslices: int = 8,
 
 
 def build_analog_model(ideal: bool = False):
-    """Our verified option-A ResNet-20, with conv/fc layers converted to
-    CrossSim analog layers. BatchNorm is fused into the preceding conv's
-    weights (the standard inference-time fold), matching how a real analog
-    array would have to absorb BN scale/shift into its stored conductances."""
+    """Our verified option-A ResNet-20 with conv/fc swapped for CrossSim
+    analog layers. BN gets folded into the preceding conv weights (standard
+    inference-time trick) since a real analog array has no separate place to
+    stash a BN scale/shift -- it has to be baked into the stored conductances."""
     from simulator.algorithms.dnn.torch.convert import convertible_modules, from_torch
 
     model = load_pretrained(CHECKPOINT)

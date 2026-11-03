@@ -1,23 +1,21 @@
 """ResNet-20 inference costed on DARTH-PUM.
 
-[DARTH] Section 5.1: "We place the layers of the neural network (matrices) into
-analog arrays, while reserving digital pipelines for input vectors." All layers'
-weights stay resident simultaneously (the whole network needs only 784 of the
-chip's ~1844 tiles -- see mapping.py), so one inference instance occupies a
-small, fixed slice of the chip and throughput comes from running many instances
-in parallel across the rest.
+[DARTH] Sec. 5.1 is pretty direct about this: "We place the layers of the
+neural network (matrices) into analog arrays, while reserving digital
+pipelines for input vectors." The whole network only needs ~784 of the chip's
+~1844 tiles (see mapping.py) and stays resident the whole time, so one
+inference instance sits in a small fixed corner of the chip and throughput
+comes from just running a lot of instances in parallel elsewhere.
 
-Within one instance, the paper is explicit about the split: convolution and FC
-go to the ACE (analog MVM); everything else -- batch norm, ReLU, pooling,
-residual adds -- goes to the DCE, since none of those are matrix-vector
-multiplies.
+Split within one instance: conv + FC -> ACE (that's the analog MVM part),
+everything else -> DCE (batch norm, ReLU, pooling, residual adds -- none of
+that is a matrix-vector multiply, so it has no business being analog).
 
-Convolution weights and activations are INT8, so each layer needs input
-bit-slicing (8 cycles, one input bit per cycle) and the matrix itself is
-bit-sliced across cell_bits-wide arrays (mapping.py's physical tile count
-already accounts for this). Row-tiles (when k*k*C_in > 64) also need a final
-digital accumulate -- a layer with R row-tiles produces R partial sums that
-must be summed.
+Weights and activations are both INT8. Every layer needs input bit-slicing (8
+cycles, one bit at a time) and the weight matrix is bit-sliced across
+cell_bits-wide arrays (mapping.py already bakes this into the tile count).
+Layers with row-tiles (k*k*C_in > 64) also need a digital accumulate at the
+end to sum up the R partial sums from R row-tiles.
 """
 
 from __future__ import annotations
@@ -37,18 +35,15 @@ VALUE_BITS = 8          # INT8 weights
 CELL_BITS = 1           # SLC, matching [DARTH] Section 7.5's accuracy result
 
 
+# [DARTH] Table 2: one ACE = 64 arrays. LayerMapping.tiles gives an ARRAY
+# count (from ace.py's tiles_for_matrix), not an HCT count, so dividing by
+# this converts "how many arrays does the resident network occupy" into "how
+# many tiles does that take". Don't confuse this with the "waves" concept
+# inside mvm_cost -- that's a TIMING question (how many sequential conversion
+# rounds one MVM call needs if it alone exceeds 64 arrays), this is a
+# CAPACITY question (how much area the whole, statically-placed network
+# occupies). Related, not the same thing.
 ARRAYS_PER_ACE = 64
-"""[DARTH] Table 2: one ACE holds 64 arrays. LayerMapping.tiles (ace.py's
-tiles_for_matrix) returns an ARRAY count, not an HCT count, so the network's
-total array footprint must be divided by ARRAYS_PER_ACE to get the number of
-tiles needed to hold it resident. Layers are placed statically and held
-resident simultaneously ([DARTH] Section 5.1), so this is an AREA/capacity
-question (how many ACEs' worth of array footprint the resident network
-occupies), separate from the WAVES concept inside
-AnalogComputeElement.mvm_cost, which answers a TIMING question instead: if
-one MVM call alone needs more arrays than one ACE has, how many sequential
-conversion rounds are needed. Both matter, but they are not interchangeable.
-"""
 
 
 @dataclass(frozen=True)
@@ -56,38 +51,35 @@ class LayerCost:
     name: str
     cycles: int
     energy_pJ: float
-    tiles: int
-    """Physical ARRAYS this layer occupies (not HCTs -- see ARRAYS_PER_ACE)."""
+    tiles: int  # physical ARRAYS, not HCTs -- see ARRAYS_PER_ACE
 
 
 def layer_cost(m: LayerMapping, tile: HybridComputeTile,
                reduction: str = "tree", active_row_fraction: float = 1.0) -> LayerCost:
     """Cost of one conv/fc layer, run once per output spatial position.
 
-    Passes the full (unsliced) weight_rows/weight_cols straight to
-    AnalogComputeElement.mvm_cost, which computes the array footprint
-    (row-tiles x col-tiles x bit-slices) and the resulting wave count if that
-    exceeds one ACE's 64-array capacity.
+    We hand the full, unsliced weight_rows/weight_cols to
+    AnalogComputeElement.mvm_cost, which works out the array footprint
+    (row-tiles x col-tiles x bit-slices) and the wave count if that's more
+    than one ACE's 64 arrays.
 
-    mvm_cost does not charge for recombining the row-tile partial sums
-    (different row-tiles cover different reduction-dimension slices of the
-    same output, so their results must be added) or the bit-sliced weight
-    partial products (different bit-slices must be shifted and added, the
-    same shift-and-add pattern the HCT's coordination layer implements for
-    input bit-slicing -- see hct.py). Column-tiles need no recombination:
-    different column-tiles are different, independent output channels. That
-    digital accumulation is added here.
+    What mvm_cost does NOT charge for: recombining row-tile partial sums
+    (different row-tiles are different slices of the reduction dimension, so
+    they need adding together), or the bit-sliced weight partial products
+    (same shift-and-add idea the HCT does for input bit-slicing, see hct.py).
+    Column-tiles are fine on their own -- different column-tiles are just
+    different output channels, nothing to combine. So that missing digital
+    accumulate is added right here.
 
-    `reduction` picks how the partial sums are combined:
-      "tree"   (default) -- pairwise tree reduction, ceil(log2(n)) SEQUENTIAL
-                levels, each level's additions independent of one another (and
-                so, in principle, pipelineable). This is what any reasonable
-                hardware/compiler would do, not an optimistic stretch.
-      "serial" -- naive sequential chain, n-1 dependent additions. A clearly
-                worse upper bound, kept only as a documented sensitivity check.
+    reduction controls how the partial sums get combined:
+      "tree"   (default) pairwise tree, ceil(log2(n)) levels, each level's
+               adds independent of each other and pipelineable in principle.
+               Basically what any sane compiler/hardware would actually do.
+      "serial" naive chain, n-1 dependent adds. Clearly worse, kept around
+               only as a sensitivity check.
 
-    `active_row_fraction`: zero-skipping (see sparsity.py). Forwarded to
-    tile.mvm -- 1.0 (default) leaves this layer's cost unchanged.
+    active_row_fraction is the zero-skipping knob (sparsity.py), passed
+    straight through to tile.mvm. 1.0 default = no change from before.
     """
     row_tiles = -(-m.weight_rows // 64)
     bit_slices = -(-VALUE_BITS // CELL_BITS)
@@ -108,8 +100,8 @@ def layer_cost(m: LayerMapping, tile: HybridComputeTile,
         n_adds = (math.ceil(math.log2(partials_to_combine)) if reduction == "tree"
                  else partials_to_combine - 1)
         accumulate_cycles = n_adds * add.latency_cycles
-        # Energy charges every pairwise add regardless of reduction shape (the
-        # same total work happens either way); only LATENCY differs with depth.
+        # energy is charged per pairwise add no matter the reduction shape --
+        # same total work either way, it's only the LATENCY that depends on depth
         accumulate_energy = (partials_to_combine - 1) * add.energy_pJ
 
     return LayerCost(
@@ -120,19 +112,15 @@ def layer_cost(m: LayerMapping, tile: HybridComputeTile,
     )
 
 
-# --------------------------------------------------------------------------
-# Non-MVM kernels: batch norm, ReLU, residual add, pooling, all on the DCE.
-# --------------------------------------------------------------------------
+# non-MVM kernels: batch norm, ReLU, residual add, pooling -- all DCE
 
 def nonmvm_cost(tile: HybridComputeTile, elements: int, has_bn: bool,
                 has_relu: bool, has_residual: bool) -> LayerCost:
-    """Per-position cost of the digital ops following a conv layer.
-
-    Batch norm folds to one multiply-add per channel (modelled as ADD, since the
-    DCE has no native multiply primitive cheaper than its MUL8 recipe and a
-    scale-and-shift is the common inference-time BN folding); ReLU uses the
-    recipe book's native RELUv1; a residual connection is one more ADD.
-    """
+    """Per-position cost of the digital ops that follow a conv layer. BN folds
+    to one multiply-add per channel (we model it as ADD -- DCE's cheapest
+    multiply primitive is MUL8 and a scale-and-shift BN fold is the usual
+    inference-time trick anyway); ReLU is the recipe book's RELUv1; a residual
+    connection is just one more ADD."""
     cycles = energy = 0.0
     if has_bn:
         c = tile.digital_op("ADD", width_bits=OUTPUT_BITS, elements=elements)
@@ -154,17 +142,15 @@ def inference_cost(
 ) -> tuple[list[LayerCost], list[LayerCost]]:
     """Full-network cost: (per-layer MVM costs, per-layer non-MVM costs).
 
-    Every conv layer except the network's very last one is followed by BN+ReLU;
-    the second conv of every BasicBlock additionally gets a residual add before
-    its ReLU (the standard post-activation ResNet design this architecture uses).
+    Every conv layer but the last gets BN+ReLU after it; the second conv in
+    each BasicBlock also gets a residual add before its ReLU (standard
+    post-activation ResNet, which is what this network actually is).
 
-    `zero_skip`: the zero-skipping contribution. When True, each layer's
-    wordline drivers are disabled in proportion to its MEASURED input
-    activation sparsity (sparsity.py -- real zeros, counted on real CIFAR-10
-    images through our own checkpoint, not an assumed textbook rate),
-    reducing analog energy with no change to cycles or accuracy. False
-    (default) reproduces every number computed before this contribution
-    existed.
+    zero_skip=True disables each layer's wordline drivers in proportion to
+    its MEASURED activation sparsity (sparsity.py -- real zeros counted on
+    real CIFAR-10 through our checkpoint, not a guessed rate), which cuts
+    analog energy without touching cycles or accuracy. Default False
+    reproduces every number from before this contribution was added.
     """
     tile = tile or HybridComputeTile(ace_params)
     mappings = map_resnet20(value_bits=VALUE_BITS, ace=tile.ace)
@@ -194,8 +180,8 @@ def inference_cost(
 
 
 def hcts_per_instance(mvm_costs: list[LayerCost]) -> int:
-    """Convert the network's total array footprint into HCTs (tiles) needed to
-    hold it resident. See ARRAYS_PER_ACE for why this is not a 1:1 sum."""
+    """Total array footprint -> HCTs needed to hold the network resident.
+    (see ARRAYS_PER_ACE -- it's not just a straight sum)"""
     total_arrays = sum(c.tiles for c in mvm_costs)
     return -(-total_arrays // ARRAYS_PER_ACE)
 

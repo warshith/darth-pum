@@ -16,12 +16,10 @@ def tile():
     return HybridComputeTile()
 
 
-# -- the array-vs-HCT bug --------------------------------------------------
-
 def test_hct_footprint_is_arrays_divided_by_64_not_summed_directly():
-    """A real bug: summing per-layer ARRAY counts (784) and using that directly
-    as tiles_per_instance left only 2 parallel inferences possible chip-wide.
-    The correct HCT footprint divides by ARRAYS_PER_ACE."""
+    """Caught this one the hard way: summing per-layer ARRAY counts (784) and
+    using that directly as tiles_per_instance left only 2 parallel inferences
+    possible on the whole chip. Dividing by ARRAYS_PER_ACE is the fix."""
     mvm_costs, _ = inference_cost()
     total_arrays = sum(c.tiles for c in mvm_costs)
     assert total_arrays == 784
@@ -30,18 +28,16 @@ def test_hct_footprint_is_arrays_divided_by_64_not_summed_directly():
 
 
 def test_hct_footprint_is_much_smaller_than_the_chip():
-    """One inference's footprint must leave room for many parallel instances."""
+    """One inference needs to leave room for plenty of others in parallel."""
     mvm_costs, _ = inference_cost()
     assert hcts_per_instance(mvm_costs) < 50, "footprint should be a small slice of ~1844 tiles"
 
 
-# -- the row-tile dropping bug ----------------------------------------------
-
 def test_wide_layers_charge_for_every_row_tile(tile):
-    """A layer needing 3 row-tiles must cost meaningfully more than one that
-    fits in a single row-tile -- an earlier version silently charged only one
-    row-tile's MVM pass for any layer wider than 64 rows, regardless of how
-    many tiles it actually needed."""
+    """A layer needing 3 row-tiles has to cost meaningfully more than one
+    fitting in a single row-tile. An earlier version of this only charged one
+    row-tile's MVM pass no matter how many row-tiles a layer actually needed --
+    this guards against that regression."""
     mappings = {m.name: m for m in map_resnet20(value_bits=8, ace=tile.ace)}
 
     single_tile = mappings["conv1"]       # 27 rows -> 1 row-tile
@@ -51,45 +47,40 @@ def test_wide_layers_charge_for_every_row_tile(tile):
 
     c1 = layer_cost(single_tile, tile)
     c2 = layer_cost(triple_tile, tile)
-    # Normalise by output positions (1024 for both, 32x32) to compare per-MAC-pass cost.
+    # normalise by output positions (1024 for both, 32x32) to compare per-MAC-pass cost
     positions = single_tile.out_shape[-1] * single_tile.out_shape[-2]
     assert c2.cycles / positions > c1.cycles / positions
 
 
-# -- reduction shape ----------------------------------------------------
-
 def test_tree_reduction_is_cheaper_than_serial(tile):
-    """Tree reduction (ceil(log2(n)) levels) must cost less than a naive
-    serial chain (n-1 adds) for any layer with more than 2 partials to
-    combine. An initial version used serial by accident and it dominated
-    layer cost by ~94%, which is implausible for a shallow reduction tree."""
+    """Tree reduction (ceil(log2(n)) levels) should beat a naive serial chain
+    (n-1 adds) once there's more than 2 partials to combine. Found a version
+    that used serial by accident, and it was blowing up layer cost by ~94%,
+    which made no sense for such a shallow reduction tree."""
     m = next(m for m in map_resnet20(value_bits=8, ace=tile.ace)
-             if m.name == "r3.0.conv2")  # the widest layer: 576 rows, 9 row-tiles
+             if m.name == "r3.0.conv2")  # widest layer: 576 rows, 9 row-tiles
     tree = layer_cost(m, tile, reduction="tree")
     serial = layer_cost(m, tile, reduction="serial")
     assert tree.cycles < serial.cycles
 
 
 def test_reduction_formula_agrees_at_two_partials():
-    """At exactly 2 partials there is only one possible pairwise add either
-    way, so tree (ceil(log2(2))=1) and serial (2-1=1) must agree -- the one
-    case where the two strategies are not supposed to differ."""
+    """At exactly 2 partials there's only one possible pairwise add either
+    way, so tree (ceil(log2(2))=1) and serial (2-1=1) have to agree."""
     assert math.ceil(math.log2(2)) == 2 - 1
 
 
 def test_reduction_formula_diverges_as_partials_grow():
-    """The whole point of using a tree: the gap between tree and serial costs
-    must widen as more partials need combining (log growth vs linear growth)."""
+    """Point of using a tree in the first place: the gap vs serial should
+    widen as more partials need combining (log growth vs linear)."""
     gaps = [(n - 1) - math.ceil(math.log2(n)) for n in (4, 8, 16, 24)]
     assert gaps == sorted(gaps), "the tree-vs-serial gap should grow with n"
     assert gaps[-1] > gaps[0]
 
 
-# -- sanity -----------------------------------------------------------------
-
 def test_inference_cost_is_dominated_by_mvm_not_nonmvm():
-    """Convolutions should dominate a CNN's cost; batch norm/ReLU/residual
-    adds are comparatively cheap per-channel digital ops."""
+    """Convolutions should dominate; BN/ReLU/residual adds are cheap
+    per-channel digital ops in comparison."""
     mvm_costs, nonmvm_costs = inference_cost()
     total_mvm = sum(c.cycles for c in mvm_costs)
     total_nonmvm = sum(c.cycles for c in nonmvm_costs)

@@ -1,15 +1,14 @@
-"""Generate every result figure for the report, from live results.
+"""Generates every result figure that goes into the report.
 
-Every number plotted here is either computed fresh from the simulator
-modules, or pulled from a value already measured and pinned by the test
-suite (CrossSim accuracy runs take minutes, so those three numbers are the
-one exception -- see workloads/resnet20/accuracy.py and
-contribution/precision_tradeoff.py for the runs that produced them).
+Everything plotted here is computed live from the simulator modules, except
+the three CrossSim accuracy numbers -- those runs take minutes each so we
+just hardcode the already-measured values (see workloads/resnet20/accuracy.py
+and contribution/precision_tradeoff.py for the actual runs).
 
-The HCT architecture diagram is drawn directly in the report as a TikZ
-figure, not generated here -- a block diagram has no data to compute.
+(The HCT diagram itself is TikZ straight in the report, not generated here --
+it's a block diagram, there's no data behind it to plot.)
 
-Run:  python -m experiments.make_figures
+Run: python -m experiments.make_figures
 """
 
 import os
@@ -27,9 +26,7 @@ os.makedirs("paper/figs", exist_ok=True)
 setup()
 
 
-# --------------------------------------------------------------------------
-# Figure 1: reproduction summary -- throughput and latency, paper vs. ours.
-# --------------------------------------------------------------------------
+# Figure 1 -- reproduction summary, throughput and latency vs the paper
 
 def fig_reproduction_summary():
     from darthpum.chip import Chip, Workload
@@ -70,13 +67,10 @@ def fig_reproduction_summary():
     return throughput_speedup, latency_speedup
 
 
-# --------------------------------------------------------------------------
-# Figure 2: ResNet-20 accuracy under increasing analog non-idealities.
-# --------------------------------------------------------------------------
+# Figure 2 -- accuracy as we pile on the analog non-idealities
 
 def fig_resnet20_accuracy():
-    # Measured on the full 10,000-image CIFAR-10 test set -- see
-    # workloads/resnet20/accuracy.py for the run that produced these.
+    # full 10k CIFAR-10 test set, see workloads/resnet20/accuracy.py for the actual run
     labels = ["fp32\n(no analog)", "CrossSim\nideal", "With device\nnoise (1 bit/cell)"]
     values = [91.69, 91.69, 83.43]
     colors = [NEUTRAL, BLUE, ORANGE]
@@ -91,9 +85,7 @@ def fig_resnet20_accuracy():
     save(fig, "resnet20_accuracy")
 
 
-# --------------------------------------------------------------------------
-# Figure 3: the precision/throughput tradeoff contribution.
-# --------------------------------------------------------------------------
+# Figure 3 -- precision/throughput tradeoff (contribution)
 
 def fig_precision_tradeoff():
     from contribution.precision_tradeoff import throughput_sweep
@@ -120,9 +112,8 @@ def fig_precision_tradeoff():
     save(fig, "precision_tradeoff")
 
 
-# --------------------------------------------------------------------------
-# Figure 4: the zero-skipping contribution -- why the real number is small.
-# --------------------------------------------------------------------------
+# Figure 4 -- zero-skipping. this is the one where the honest number
+# disappoints the naive estimate, which is kind of the whole point
 
 def fig_zero_skip_dilution():
     from darthpum.hct import HybridComputeTile
@@ -150,10 +141,8 @@ def fig_zero_skip_dilution():
     return measured_pct
 
 
-# --------------------------------------------------------------------------
-# Figure 5: ResNet-20's per-layer array footprint (why throughput comes from
-# replication, not per-layer speed).
-# --------------------------------------------------------------------------
+# Figure 5 -- per-layer array footprint. throughput here is about replication
+# across tiles, not any single layer running faster, this figure is why.
 
 def fig_layer_footprint():
     from darthpum.hct import HybridComputeTile
@@ -177,10 +166,7 @@ def fig_layer_footprint():
     return sum(tiles)
 
 
-# --------------------------------------------------------------------------
-# Figure 6: OSCAR digital cost table cross-check against RACER's published
-# MAGIC-family NOR count.
-# --------------------------------------------------------------------------
+# Figure 6 -- OSCAR cost table vs RACER's published MAGIC NOR count
 
 def fig_oscar_crosscheck():
     from darthpum.recipes import load
@@ -199,12 +185,9 @@ def fig_oscar_crosscheck():
     return recipes["ADD"].cycles, recipes["ADD"].mix.get("NOR", 0)
 
 
-# --------------------------------------------------------------------------
-# Submission folders: the assignment asks for "Baseline Results" and
-# "Contribution Results" as their own graphs/tables, separate from the
-# report. These copy the already-generated figures and add a short summary
-# table each, so the two deliverables stand on their own.
-# --------------------------------------------------------------------------
+# Submission folders -- the assignment wants "Baseline Results" and
+# "Contribution Results" as their own thing, separate from the report pdf.
+# just copies figures we already made plus a short summary table each.
 
 BASELINE_README = """# Baseline Results
 

@@ -1,18 +1,17 @@
 """ResNet-20 for CIFAR-10, matching the paper-faithful (option-A) architecture.
 
 [DARTH] Figure 15 shows exactly 20 per-layer bars ending in `fc`, with no
-downsample-conv bars for the two stride-2 transitions -- that is the signature of
-He et al.'s original **option-A** shortcut (parameter-free zero-padding), not the
-1x1-conv downsample some later reimplementations use (option-B adds two extra
-conv layers, which would show up as two more bars). We therefore match
-`akamaster/pytorch_resnet_cifar10`, not `chenyaofo/pytorch-cifar-models` (which is
-option-B and ~0.9% more accurate -- a gap larger than most of the quantisation
-losses we'll be measuring, so getting the right variant matters).
+downsample-conv bars at the two stride-2 transitions. That's the signature of
+He et al.'s original option-A shortcut (parameter-free zero-padding), not the
+1x1-conv downsample some reimplementations use (option-B adds two extra conv
+layers, which would show up as two more bars). So we match
+`akamaster/pytorch_resnet_cifar10` here, not `chenyaofo/pytorch-cifar-models`
+(option-B, ~0.9% more accurate -- bigger than most of the quantisation losses
+we're measuring, so getting the variant right actually matters).
 
-Architecture: a 3x3 stem (3->16), then three stages of 3 BasicBlocks each
-(16/32/64 channels at 32x32/16x16/8x8 resolution), global average pool, and a
-64->10 FC layer. 20 weight layers total (19 conv + 1 fc) -- matching the paper's
-Figure 15 bar count.
+Architecture: 3x3 stem (3->16), three stages of 3 BasicBlocks each (16/32/64
+channels at 32x32/16x16/8x8), global average pool, 64->10 FC. 20 weight layers
+total (19 conv + 1 fc), matching the Figure 15 bar count.
 """
 
 from __future__ import annotations
@@ -31,9 +30,9 @@ REPORTED_TOP1_ACCURACY = 91.73  # akamaster's reported accuracy for this checkpo
 class LambdaLayer(nn.Module):
     """Option-A shortcut: zero-pad channels, stride-2 subsample spatially.
 
-    No parameters, no extra conv layer -- this is precisely why option-A nets
-    have exactly 19 conv layers while option-B nets have 21 (two 1x1 downsample
-    convs). Matching the paper's Figure 15 bar count requires option-A.
+    No parameters, no extra conv -- exactly why option-A nets have 19 conv
+    layers and option-B has 21 (two extra 1x1 downsample convs). Matching the
+    paper's bar count needs option-A.
     """
 
     def __init__(self, lambd):
@@ -56,9 +55,9 @@ class BasicBlock(nn.Module):
 
         self.shortcut = nn.Sequential()
         if stride != 1 or in_planes != planes:
-            # Option A: pad extra channels with zeros, subsample spatially by
-            # striding. [DARTH] Figure 15's "r2.0.conv1"-style bars with no
-            # matching downsample-conv bar is the tell that this is the variant.
+            # option A: pad extra channels with zeros, subsample spatially by
+            # striding. the "r2.0.conv1"-style bars in Figure 15 with no
+            # matching downsample-conv bar is the tell for this variant.
             pad = planes - in_planes
             self.shortcut = LambdaLayer(
                 lambda x: F.pad(x[:, :, ::stride, ::stride], (0, 0, 0, 0, pad // 2, pad - pad // 2))
@@ -104,9 +103,12 @@ class ResNet20(nn.Module):
 
 
 def load_pretrained(checkpoint_path: str) -> ResNet20:
-    """Load akamaster's checkpoint, which wraps the model in nn.DataParallel
-    (so state dict keys are prefixed with "module.") and stores extra training
-    metadata alongside the weights."""
+    """Load akamaster's checkpoint.
+
+    It wraps the model in nn.DataParallel (keys prefixed with "module.") and
+    stores extra training metadata alongside the weights, hence the cleanup
+    below.
+    """
     model = ResNet20()
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt

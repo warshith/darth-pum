@@ -1,9 +1,8 @@
-"""ResNet-20 accuracy under CrossSim: config wiring and a fast smoke test.
+"""CrossSim config wiring + a fast smoke test, not accuracy validation.
 
-The full 10,000-image evaluation takes minutes, too slow for a unit test suite
--- these tests use tiny image counts (fast) to catch wiring bugs (the kind
-that crashed the first run: drift_model defaulting to Python None instead of
-the string "none"), not to validate the accuracy NUMBER itself.
+The real 10k-image run takes minutes, way too slow to put in a test suite, so
+these just use tiny image counts to catch wiring bugs (the drift_model=None
+crash below being exhibit A) instead of checking the actual accuracy number.
 """
 
 from pathlib import Path
@@ -23,10 +22,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_ideal_params_build_without_crashing():
-    """The bug this guards against: dnn_inference_params defaults
-    drift_model to Python None, not the string 'none', which crashes
-    CrossSim's device factory unless set explicitly. Caught on the first
-    real run before any accuracy number was trusted."""
+    """dnn_inference_params defaults drift_model to None instead of the
+    string "none", which crashes CrossSim's device factory if you don't set
+    it explicitly -- found this the hard way on the first real run."""
     from workloads.resnet20.accuracy import _device_params
     p = _device_params(ideal=True)
     assert p is not None
@@ -39,10 +37,9 @@ def test_noisy_params_build_without_crashing():
 
 
 def test_ideal_model_matches_fp32_on_a_tiny_sample():
-    """With no non-idealities, CrossSim's conversion must reproduce the plain
-    PyTorch model's predictions exactly -- this is the sanity check that
-    catches conversion bugs (wrong layer mapping, bad BN fusion) independently
-    of anything noise-related."""
+    """No noise turned on, so CrossSim's conversion should match plain
+    PyTorch exactly -- catches conversion bugs (bad layer mapping, broken BN
+    fusion) without any noise-related confound."""
     from workloads.resnet20.accuracy import build_analog_model, evaluate
     from workloads.resnet20.model import load_pretrained
 
@@ -56,9 +53,9 @@ def test_ideal_model_matches_fp32_on_a_tiny_sample():
 
 
 def test_noisy_model_runs_and_gives_a_valid_accuracy():
-    """Not a check against the paper's 75.4% (20 images is far too small a
-    sample for that) -- just confirms the full RRAMMilo + SLC + SAR path
-    executes end-to-end and returns a value in a sane range."""
+    """20 images is nowhere near enough to check against the paper's 75.4%,
+    this just confirms the RRAMMilo + SLC + SAR path runs end to end and
+    spits out something sane."""
     from workloads.resnet20.accuracy import build_analog_model, evaluate
 
     noisy = build_analog_model(ideal=False)
@@ -67,11 +64,10 @@ def test_noisy_model_runs_and_gives_a_valid_accuracy():
 
 
 def test_noisy_accuracy_is_not_better_than_ideal():
-    """Device noise should not somehow IMPROVE accuracy over the noise-free
-    case -- a basic direction check, even on a tiny, noisy-by-sample-size
-    comparison (allowing some slack since 20 images is a small sample)."""
+    """Basic direction check -- noise shouldn't make things BETTER. 200
+    images is still small so leave some slack for sampling noise."""
     from workloads.resnet20.accuracy import build_analog_model, evaluate
 
     ideal_acc = evaluate(build_analog_model(ideal=True), n_images=200, batch_size=100)
     noisy_acc = evaluate(build_analog_model(ideal=False), n_images=200, batch_size=100)
-    assert noisy_acc <= ideal_acc + 5.0  # small slack for sampling noise
+    assert noisy_acc <= ideal_acc + 5.0  # slack for sampling noise

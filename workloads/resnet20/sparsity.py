@@ -1,30 +1,28 @@
 """Measured ReLU output sparsity for our ResNet-20 checkpoint on real CIFAR-10
-images -- the evidence base for the zero-skipping ACE contribution.
+images. This is the evidence the zero-skipping ACE contribution rests on.
 
-CNN activations are widely known to be sparse after ReLU (any negative
-pre-activation becomes exactly zero), but "widely known" is not evidence:
-this module measures our OWN model's actual sparsity rather than assume a
-textbook figure, the same discipline as every cost number elsewhere in this
-project. `measure()` hooks `torch.nn.functional.relu` (the model calls it
-functionally in model.py's forward(), not as an nn.ReLU module, so a module
-hook would silently fire zero times) and records the fraction of exact zeros
-in its output, over one real batch of CIFAR-10 test images.
+Everyone knows post-ReLU activations are sparse (negative pre-activation ->
+exact zero), but "everyone knows" isn't a number we can put in a table, so
+this module measures OUR model's actual sparsity instead of assuming some
+textbook rate -- same rule we've tried to follow for every cost figure in
+this project. measure() hooks torch.nn.functional.relu directly, since
+model.py calls it functionally in forward() rather than as an nn.ReLU module
+(a module-level hook would just silently never fire), and logs the fraction
+of exact zeros over one real CIFAR-10 test batch.
 
-Result, 256 test images, our verified checkpoint: mean 51.1% zero activations
-across the network's 19 ReLU sites, ranging from 15.3% (an early layer, few
-dead units yet) to 81.3% (a late layer). The MEASURED_SPARSITY tuple below is
-this measurement, stored so the contribution's numbers do not require
-re-running inference on every import; `measure()` regenerates it.
+What we got, 256 test images on the checkpoint we're actually using: mean
+51.1% zeros across the network's 19 ReLU sites, from 15.3% on an early layer
+up to 81.3% on a late one. MEASURED_SPARSITY below is that result, cached so
+nothing downstream has to re-run inference on every import -- call measure()
+if you want it fresh.
 
-What this sparsity is actually worth: see darthpum/ace.py's
-`active_row_fraction` docstring. Disabling a zero row's wordline driver only
-touches the "Row Periphery" energy term, which is a small fraction of total
-ACE energy once ADC conversion (always active, unaffected by which rows were
-zero) and digital recombination of bit-sliced partial sums (also unaffected)
-are accounted for. Measured end-to-end on the whole ResNet-20 network, this
-51% sparsity yields roughly a 3% total energy reduction -- real, but much
-smaller than the 51% figure alone would suggest, for a specific, identified
-reason rather than an unexplained shortfall.
+How much is that sparsity actually worth? See the active_row_fraction note in
+darthpum/ace.py. Short version: disabling a zero row's wordline driver only
+touches "Row Periphery", a small slice of ACE energy once you account for ADC
+conversion (runs regardless) and digital recombination of partial sums (also
+runs regardless). End to end on the real network, 51% sparsity buys roughly
+3% total energy, not 51% -- smaller than it sounds, but for a reason we can
+actually point to.
 """
 
 from __future__ import annotations
@@ -48,9 +46,9 @@ MEASUREMENT_MEAN = sum(MEASURED_SPARSITY) / len(MEASURED_SPARSITY)
 
 
 def measure(n_images: int = 256) -> tuple[float, ...]:
-    """Regenerate MEASURED_SPARSITY from scratch: real inference, real images,
-    real zeros counted -- not estimated. Requires torch/torchvision and the
-    downloaded checkpoint + CIFAR-10 test set."""
+    """Regenerate MEASURED_SPARSITY from scratch -- real inference, real
+    images, real zeros counted. Needs torch/torchvision plus the checkpoint
+    and CIFAR-10 test set downloaded."""
     import torch
     import torch.nn.functional as F
     from torchvision import datasets, transforms
@@ -88,19 +86,18 @@ def measure(n_images: int = 256) -> tuple[float, ...]:
 def layer_skip_fractions() -> dict[str, float]:
     """Map the 19 measured ReLU sparsities onto mapping.py's 20 layer names.
 
-    mapping.py's layer order is [conv1, r1.0.conv1, r1.0.conv2, r1.1.conv1,
-    r1.1.conv2, ..., r3.2.conv2, fc] -- 20 entries. conv1 (the stem) consumes
-    the raw image, which is not sparse, so it gets 0.0 (no skipping). Each of
-    the remaining 19 layers consumes the output of exactly one ReLU, in the
-    same order the forward pass executes them, so MEASURED_SPARSITY[i] is
-    layer i+1's input skip fraction.
+    Layer order from mapping.py: [conv1, r1.0.conv1, r1.0.conv2, r1.1.conv1,
+    r1.1.conv2, ..., r3.2.conv2, fc] -- 20 of them. conv1 is the stem, eats
+    the raw image (not sparse at all), so it just gets 0.0. The other 19 each
+    consume exactly one ReLU's output, in forward-pass order, so
+    MEASURED_SPARSITY[i] lines up with layer i+1.
     """
     from .mapping import map_resnet20
 
     names = [m.name for m in map_resnet20()]
     assert len(names) == len(MEASURED_SPARSITY) + 1, (
-        f"expected {len(MEASURED_SPARSITY) + 1} layers, mapping.py gives {len(names)} "
-        "-- the ResNet-20 architecture changed; re-derive the ReLU-to-layer mapping"
+        f"expected {len(MEASURED_SPARSITY) + 1} layers, mapping.py gives {len(names)} -- "
+        "did the ResNet-20 architecture change? the ReLU-to-layer mapping needs redoing"
     )
     out = {names[0]: 0.0}
     for name, s in zip(names[1:], MEASURED_SPARSITY):

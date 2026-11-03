@@ -1,47 +1,42 @@
 """Analog Compute Element: ReRAM crossbar matrix-vector multiply.
 
-How the analog multiply works
------------------------------
-Matrix values are programmed as device conductances. Driving wordline i with
-voltage V_i makes each device pass I = V_i * G_ij (Ohm), and every device on
-bitline j sums its current onto that wire (Kirchhoff). The current on bitline j is
-therefore sum_i V_i * G_ij -- a dot product computed by physics, in one shot,
-for all 64 bitlines at once. That is the entire appeal: no clocked multiply-
-accumulate, just settling time.
+Matrix values live as device conductances. Drive wordline i with voltage V_i
+and each device passes I = V_i * G_ij (Ohm's law); every device on bitline j
+dumps its current onto that wire (Kirchhoff). So the current on bitline j is
+just sum_i V_i * G_ij -- a dot product for free, all 64 bitlines at once, no
+clocked multiply-accumulate at all. That's the whole appeal of doing this in
+analog.
 
-The costs are at the edges. Inputs must be converted to voltages, outputs back to
-digits, and analog devices hold only a few bits reliably. So:
+Of course the catch is at the edges, not the middle. Devices only hold a
+couple of bits reliably and inputs/outputs have to be converted to/from
+voltages, so:
 
-  * **Matrix bit-slicing.** A W-bit matrix value is split across
-    ceil(W / cell_bits) arrays, and their partial products recombined by shifting
-    and adding ([DARTH] Figure 2). In SLC mode (1 bit/cell) an 8-bit weight needs
-    8 arrays.
-  * **Input bit-slicing.** Rather than build high-resolution DACs, an N-bit input
-    is applied one bit per cycle over N cycles, each producing a partial product
-    ([DARTH] Section 2.2.1). This also removes DAC non-linearity as an error source.
+  * matrix bit-slicing -- a W-bit weight gets split across ceil(W/cell_bits)
+    arrays, partial products recombined by shift-and-add ([DARTH] Fig. 2). SLC
+    (1 bit/cell) means an 8-bit weight eats 8 arrays.
+  * input bit-slicing -- instead of a high-resolution DAC, an N-bit input goes
+    in one bit per cycle over N cycles ([DARTH] Sec. 2.2.1). Side benefit: no
+    DAC non-linearity to worry about.
 
-Where the ADC choice bites
---------------------------
-Digitising the bitlines dominates, and the two converter types fail in opposite
-directions:
+Digitizing the bitlines is where most of the cost actually lives, and the two
+ADC families fall apart in opposite ways:
 
-  * **SAR** does a binary search: fast per conversion, but converts one bitline at
-    a time, so a handful of ADCs must be multiplexed across all 64 bitlines.
-    Cost scales with *bitline count*: ceil(64 / n_adc) cycles.
-  * **Ramp** sweeps a reference voltage and compares, which is slow -- 256 cycles
-    at full 8-bit resolution -- but it digitises **every bitline concurrently**,
-    and it can stop early when only the low-order output bits are wanted. Cost
-    scales with *required output precision*: 2^out_bits cycles.
+  * SAR -- binary search, fast, but one bitline at a time, so a couple of ADCs
+    get time-multiplexed across all 64. Cost ~ ceil(64/n_adc) cycles,
+    independent of how many output bits you actually want.
+  * Ramp -- sweeps a reference and compares. Slow in the worst case (256
+    cycles at full 8-bit res) but it hits every bitline at once, and you can
+    bail out early once you have enough output bits. Cost ~ 2^out_bits cycles.
 
-So the better converter is a property of the workload, not of the chip: a
-kernel that only needs a couple of output bits favours ramp's early
-termination, while ResNet-20's ~8-bit outputs cost ramp the full 256 cycles
-against SAR's 32 -- SAR wins by 8x, matching the paper's overall 1.5x
-advantage for SAR once averaged across its workload mix ([DARTH] Section 7.3).
+Net result: which converter wins depends on the workload, not the chip. A
+kernel that only needs 2 output bits should clearly use ramp; ResNet-20 wants
+~8 bits, where ramp's full 256 cycles loses badly to SAR's 32 (an 8x gap,
+roughly consistent with the paper's overall 1.5x SAR advantage once you
+average across its whole workload mix -- [DARTH] Sec. 7.3).
 
-The paper picks one converter for the whole chip and accepts the loss on
-workloads that would have preferred the other. Modelling both explicitly
-here is what lets us measure that loss.
+The paper just commits to one converter chip-wide and eats the loss on
+whichever workload wanted the other one. We model both so that loss is
+actually measurable instead of hand-waved.
 """
 
 from __future__ import annotations
@@ -66,8 +61,7 @@ class MVMCost:
     arrays_used: int
     cycles: int
     energy_pJ: float
-    adc_cycles: int
-    """Cycles spent in conversion alone -- usually most of `cycles`."""
+    adc_cycles: int  # conversion alone, usually most of `cycles`
 
     @property
     def adc_fraction(self) -> float:
@@ -89,15 +83,12 @@ class AnalogComputeElement:
         self.p = params or ACEParams()
         self.chip = chip or ChipParams()
 
-    # -- mapping --------------------------------------------------------
+    # mapping
 
     def tiles_for_matrix(self, rows: int, cols: int, value_bits: int = 8) -> int:
-        """Arrays needed to hold a rows x cols matrix.
-
-        The standard ISAAC/PUMA tiling: chop the matrix into array-sized blocks,
-        zero-padding the partial ones, then replicate across bit-slices.
-        Row-tiles produce partial sums that must be accumulated digitally.
-        """
+        """Arrays needed to hold a rows x cols matrix (the ISAAC/PUMA tiling:
+        chop into array-sized blocks, zero-pad the leftovers, replicate across
+        bit-slices). Row-tiles still need a digital accumulate afterward."""
         slices = math.ceil(value_bits / self.p.cell_bits)
         return (math.ceil(rows / self.p.array.rows)
                 * math.ceil(cols / self.p.array.cols)
@@ -106,13 +97,13 @@ class AnalogComputeElement:
     def fits(self, rows: int, cols: int, value_bits: int = 8) -> bool:
         return self.tiles_for_matrix(rows, cols, value_bits) <= self.p.num_arrays
 
-    # -- conversion cost ------------------------------------------------
+    # -- ADC / conversion cost --
 
     def adc_cycles_per_slice(self, output_bits: int | None = None) -> int:
         """Cycles to digitise one array's bitlines after a single input bit-slice.
 
-        This is the method that encodes the whole SAR-vs-ramp trade-off, so it is
-        also the hook our contribution modifies.
+        This is the one function that encodes the whole SAR-vs-ramp story, so
+        it's also what our contribution hooks into.
         """
         adc = self.p.adc
         bits = output_bits if output_bits is not None else adc.resolution_bits
@@ -131,7 +122,7 @@ class AnalogComputeElement:
 
         raise ValueError(f"unknown ADC kind {adc.kind!r}")
 
-    # -- cost -----------------------------------------------------------
+    # -- the actual cost model --
 
     def mvm_cost(
         self,
@@ -144,30 +135,26 @@ class AnalogComputeElement:
     ) -> MVMCost:
         """Cost of multiplying a rows x cols matrix by one input vector.
 
-        Row-tiles are summed digitally afterwards, by the DCE -- that cost belongs
-        to the coordination layer (hct.py), not here.
+        Row-tile partial sums get summed digitally afterward by the DCE --
+        that's hct.py's job, not this function's.
 
-        `active_row_fraction`: the zero-skipping contribution. A wordline
-        whose input element is exactly zero contributes nothing to any
-        bitline it drives, so its driver can be disabled for the whole MVM.
-        Modelled as an ENERGY-only saving, never a timing one: the bitline
-        current is still a sum over whatever rows ARE active, and the ADC
-        must still digitize it regardless of how many rows contributed -- no
-        cycle count or ADC cost changes. Only the "Row Periphery" power term
-        in _energy_pJ (the wordline-driver component of Table 3, as opposed
-        to Sample & Hold or the ADCs themselves) scales down by this
-        fraction. Default 1.0 (no rows skipped) leaves every existing cost in
-        this file unchanged.
+        active_row_fraction is the zero-skipping contribution: a wordline
+        whose input bit is exactly zero drives no current anywhere, so its
+        driver can just be switched off for the MVM. This only ever saves
+        energy, never cycles -- the bitline is still a sum over whatever rows
+        stayed active and the ADC still has to digitize it either way, so
+        cycle counts and ADC cost are untouched. All it scales down is the
+        "Row Periphery" term in _energy_pJ (the wordline-driver slice of
+        Table 3). Default 1.0 means nothing here changes from before this
+        contribution existed.
 
-        Measured end-to-end on ResNet-20 (real activation sparsity, our own
-        checkpoint, real CIFAR-10 images -- see workloads/resnet20/sparsity.py),
-        this reduces total energy by only ~3%, not the ~48% the row-driver
-        term alone would suggest: Row Periphery is a small fraction of total
-        ACE energy once ADC conversion (always active, unaffected) and the
-        digital recombination of bit-sliced partial sums (also unaffected --
-        INT8 weights on SLC cells need up to 72 partial sums combined per
-        layer, every time, regardless of which rows were zero) are accounted
-        for. Reported here rather than at the inflated row-driver-only figure.
+        End-to-end on ResNet-20 (measured sparsity, real checkpoint, real
+        CIFAR-10 -- see sparsity.py) this is worth about 3% total energy, not
+        the ~48% a naive row-driver-only estimate would suggest. Row
+        Periphery is just a small slice of ACE energy once you account for
+        ADC conversion (always running, doesn't care about zeros) and
+        recombining the bit-sliced partial sums digitally (also doesn't care
+        -- up to 72 adds per layer for INT8-on-SLC, every single time).
         """
         output_bits = (output_bits if output_bits is not None
                        else self.p.adc.resolution_bits)
@@ -179,7 +166,7 @@ class AnalogComputeElement:
         # Arrays operate in parallel, limited by how many the ACE has.
         waves = math.ceil(tiles / self.p.num_arrays)
 
-        per_slice = 1 + self.adc_cycles_per_slice(output_bits)  # drive + convert
+        per_slice = 1 + self.adc_cycles_per_slice(output_bits)  # 1 drive cycle + convert
         adc_only = self.adc_cycles_per_slice(output_bits)
 
         cycles = waves * input_bits * per_slice
@@ -197,16 +184,11 @@ class AnalogComputeElement:
 
     def _energy_pJ(self, cycles: int, adc_cycles: int, active_arrays: int,
                   active_row_fraction: float = 1.0) -> float:
-        """Table 3 power x active time.
-
-        Row periphery and sample-and-hold burn for the whole operation; the ADCs
-        only while converting.
-
-        `active_row_fraction` scales ONLY Row Periphery -- the wordline-driver
-        power -- since that is the component zero-skipping actually turns
-        off. S&H and the ADCs are untouched: the bitline still needs sampling
-        and converting regardless of how many of its rows were driven.
-        """
+        """Table 3 power x active time. Row periphery + S&H burn for the whole
+        op; ADCs only while actually converting. active_row_fraction only
+        touches Row Periphery (the wordline drivers, the bit zero-skipping
+        turns off) -- S&H and the ADCs don't care how many rows were active,
+        they still sample/convert the bitline regardless."""
         ns = cycles / self.chip.clock_GHz
         adc_ns = adc_cycles / self.chip.clock_GHz
 
@@ -217,7 +199,7 @@ class AnalogComputeElement:
 
         return (array_mW * ns + adc_mW * adc_ns)  # mW*ns == pJ
 
-    # -- functional -----------------------------------------------------
+    # functional model (not the timing model -- just "what number comes out")
 
     def mvm(
         self,
@@ -226,12 +208,13 @@ class AnalogComputeElement:
         output_bits: int | None = None,
         ideal: bool = True,
     ) -> np.ndarray:
-        """Functionally evaluate matrix @ vector as the hardware would.
+        """Evaluate matrix @ vector the way the hardware would.
 
-        With ideal=True this is exact, and must agree with numpy -- that identity
-        is what the test suite checks, so an error in bit-slicing cannot hide.
-        Device non-idealities are applied separately via noise.py (CrossSim), so
-        that the timing model and the accuracy model stay independently testable.
+        ideal=True should be exact and match plain numpy -- the test suite
+        checks this, so a bit-slicing bug can't hide behind "close enough".
+        Non-idealities (noise, drift, etc.) are handled separately via
+        CrossSim, kept out of this file on purpose so the timing model and the
+        accuracy model don't end up tangled together.
         """
         matrix = np.asarray(matrix)
         vector = np.asarray(vector)
@@ -252,12 +235,10 @@ class AnalogComputeElement:
 
     def mvm_bitsliced(self, matrix: np.ndarray, vector: np.ndarray,
                       input_bits: int = 8) -> np.ndarray:
-        """Evaluate via explicit input bit-slicing, exactly as the hardware does.
-
-        Applies one input bit per cycle and recombines the partial products by
-        shifting. The result must equal the direct product -- this is the check
-        that our understanding of the dataflow is right, not merely plausible.
-        """
+        """Same thing, but via explicit input bit-slicing like the real hardware:
+        one input bit per cycle, partial products recombined by shifting. Should
+        equal the direct product exactly -- if it doesn't, the dataflow model
+        is wrong somewhere, not just imprecise."""
         matrix = np.asarray(matrix, dtype=np.int64)
         vector = np.asarray(vector, dtype=np.int64)
 

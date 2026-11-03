@@ -1,48 +1,44 @@
 """Hybrid Compute Tile: the coordination layer between analog and digital PUM.
 
-This is the part of DARTH-PUM that exists nowhere else. MASTODON models digital
-PUM, CrossSim models analog crossbars, and neither knows about the other -- the
-glue between them is the paper's contribution, and this module is our
-reconstruction of it.
+This is the part of DARTH-PUM nobody else models. MASTODON does digital PUM,
+CrossSim does analog crossbars, and neither one knows the other exists -- the
+glue connecting them is basically the paper's whole contribution, and this file
+is our attempt at reconstructing it.
 
-The problem being solved
-------------------------
-Analog and digital PUM do not compose naturally. Three mismatches:
+Why it's not just "wire them together": analog and digital PUM don't compose
+for free, three separate reasons.
 
-1. **Perpendicular axes.** The analog array takes a row-wise (wordline) input and
-   accumulates down bitlines, so a result arrives as a *row* vector. Digital PUM
-   stripes data column-wise and computes along rows. Data crossing between the
-   domains must be transposed ([DARTH] Section 4.2).
+1. Perpendicular axes -- the analog array takes a row-wise input and sums down
+   bitlines, so you get a *row* vector out. Digital PUM stripes data
+   column-wise and works along rows instead. So anything crossing the
+   boundary needs a transpose ([DARTH] Sec. 4.2).
 
-2. **Latency mismatch.** An analog MVM takes hundreds of cycles, dominated by
-   conversion; a digital Boolean primitive takes a handful. Letting them
-   interleave freely would let a younger digital instruction overtake an older
-   analog one it depends on, so an arbiter serialises them.
+2. Latency mismatch -- an analog MVM is hundreds of cycles (mostly conversion);
+   a digital Boolean op is a handful. Let them run free and a younger digital
+   instruction could race ahead of an older analog one it actually depends on.
+   Hence the arbiter, which just serializes them.
 
-3. **Partial products.** Input bit-slicing means an N-bit input produces N
-   separate partial products, each needing a shift to its bit position before it
-   can be summed. The shifts, the writes into the digital arrays, and the adds
-   all contend for the same pipelines.
+3. Partial products -- bit-slicing an N-bit input gives you N partial products,
+   each needing its own shift before it can be added in. Shifts, writes into
+   the digital arrays, and the adds all fight over the same pipelines.
 
-The optimisation ([DARTH] Figures 9 and 10)
--------------------------------------------
-Mismatch 3 is the expensive one. Naively (Figure 10a), each bit-slice must be
-written into the digital pipeline (N cycles for an N-element vector register),
-then shifted into position (M cycles for a depth-M pipeline), then added -- and
-because RACER's bit-pipelined execution model cannot interleave these without
-disrupting the pipeline, they serialise. The analog side meanwhile sits idle
-waiting, having already produced the next partial product.
+#3 is the expensive one, so that's where the paper's actual optimization
+lives (Figures 9 and 10). Naively (Fig. 10a) you write a bit-slice in (N
+cycles), shift it into place (M cycles for depth M), then add -- and RACER's
+bit-pipelined model can't interleave those steps without wrecking the
+pipeline, so they just run back to back. Analog sits there idle the whole
+time holding a finished result with nowhere to put it.
 
-DARTH-PUM's answer is a bank of shift units that shift *during* the transfer from
-analog to digital, rather than after it. The shift amount is known in advance from
-the bit position, so no software intervention or reconfigurable interconnect is
-needed. That buys three things, per the paper: no repeated shift warm-up/cool-down
-per partial product, the ADC output rate can be matched to the digital write
-bandwidth, and all the adds become pipelineable.
+DARTH-PUM's fix: shift units that do the shifting *during* the transfer
+instead of after. The shift amount is known ahead of time from the bit
+position, so there's no reconfigurable routing needed, nothing dynamic. Per
+the paper this buys three things: no shift warm-up/cool-down per partial
+product, ADC output rate can be matched to digital write bandwidth, and the
+adds become pipelineable instead of serial.
 
-Both timelines are implemented here. The gap between them is an internal
-reproduction of Figure 10, and it isolates how much of DARTH-PUM's benefit comes
-from this one design decision.
+Both timelines (10a and 10b) are implemented below so the gap between them
+is a real, measured number, not an assumption -- it tells you how much of
+the whole architecture's benefit is riding on this one trick.
 """
 
 from __future__ import annotations
@@ -64,8 +60,7 @@ class HCTCost:
     energy_pJ: float
     analog_cycles: int
     digital_cycles: int
-    stall_cycles: int
-    """Cycles the arbiter spent blocking one domain on the other."""
+    stall_cycles: int  # time the arbiter spent blocking one side on the other
 
     @property
     def latency_ns(self) -> float:
@@ -85,32 +80,26 @@ class HybridComputeTile:
         self.chip = chip or ChipParams()
         self.ace = AnalogComputeElement(ace_params, self.chip)
         self.dce = DigitalComputeElement(dce_params, self.chip)
-        self.optimized = optimized
-        """False reproduces the Figure 10a timeline, for the ablation."""
+        self.optimized = optimized  # False = the Figure 10a (unoptimized) timeline
 
-    # -- interconnect ---------------------------------------------------
+    # -- the ACE<->DCE interconnect --
 
     def transfer_cycles(self, values: int, bits_per_value: int) -> int:
-        """Move a partial-product vector from the ACE to the DCE.
-
-        The on-chip network carries 8 B/cycle, a width [DARTH] Section 4 says was
-        chosen to rate-match ADC throughput against DCE write bandwidth.
-        """
+        """Move a partial-product vector from the ACE to the DCE. The on-chip
+        network is 8 B/cycle -- [DARTH] Sec. 4 picks that width specifically to
+        rate-match ADC throughput against DCE write bandwidth."""
         total_bytes = math.ceil(values * bits_per_value / 8)
         return math.ceil(total_bytes / self.chip.io_bytes_per_cycle)
 
     def shift_cycles(self, bit_position: int) -> int:
-        """Cost of placing a partial product at its bit position.
-
-        Optimised: free. The shift units act during the transfer, and the shift
-        amount is fixed by the bit position, so it costs no extra cycles.
-
-        Unoptimised: the data must be written in, then walked up the pipeline one
-        position per cycle -- the blue operations of Figure 10a.
-        """
+        """Cost of placing a partial product at its bit position. Free when
+        optimized (the shift units do it during the transfer, the shift amount
+        is already known from the bit position). Otherwise the data has to be
+        written in and then walked up the pipeline one position per cycle --
+        the slow part of Figure 10a."""
         return 0 if self.optimized else bit_position
 
-    # -- the main operation ---------------------------------------------
+    # the main operation
 
     def mvm(
         self,
@@ -121,15 +110,11 @@ class HybridComputeTile:
         value_bits: int = 8,
         active_row_fraction: float = 1.0,
     ) -> HCTCost:
-        """A full bit-sliced matrix-vector multiply across both domains.
-
-        The analog side produces one partial product per input bit-slice; the
-        digital side shifts each into position and accumulates them.
-
-        `active_row_fraction`: forwarded to AnalogComputeElement.mvm_cost --
-        the zero-skipping contribution. 1.0 (default) leaves this call
-        identical to every other workload's.
-        """
+        """Full bit-sliced MVM across both domains: analog produces one
+        partial product per input bit-slice, digital shifts each into place
+        and accumulates. active_row_fraction just passes through to
+        AnalogComputeElement.mvm_cost (the zero-skip contribution) -- leave it
+        at 1.0 and this is identical to every other call site."""
         mvm_cost = self.ace.mvm_cost(rows, cols, input_bits, output_bits, value_bits,
                                      active_row_fraction=active_row_fraction)
         out_bits = mvm_cost.output_bits
@@ -167,13 +152,11 @@ class HybridComputeTile:
         self, slices: int, analog_per_slice: int, xfer: int,
         add_latency: int, add_ii: int,
     ) -> tuple[int, int]:
-        """Figure 10b: shift during transfer, adds pipelined behind the analog work.
-
-        The analog element streams partial products back to back. Each transfer
-        carries its shift for free, and the adds pipeline at the initiation
-        interval. So the steady state is limited by whichever of the three stages
-        is slowest, and only the final add's latency is exposed at the end.
-        """
+        """Figure 10b: shift happens during the transfer, adds pipeline behind
+        the analog work. Analog streams partial products back to back, each
+        transfer's shift is free, adds pipeline at the II -- so steady state is
+        bound by whichever of the three stages is slowest, and only the final
+        add's latency shows up at the end."""
         stage = max(analog_per_slice, xfer, add_ii)
         cycles = slices * stage + add_latency
         stall = max(0, (stage - analog_per_slice) * slices)
@@ -183,14 +166,12 @@ class HybridComputeTile:
         self, slices: int, analog_per_slice: int, xfer: int,
         add_latency: int, elements: int,
     ) -> tuple[int, int]:
-        """Figure 10a: write, then shift, then add -- strictly serialised.
-
-        [DARTH] Section 4.1: "for a pipeline with N elements per vector register
-        and a depth of M, it would require N cycles to write followed by M cycles
-        to shift the data before the next set of partial products can be written".
-        The analog element stalls throughout, because its next partial product has
-        nowhere to go.
-        """
+        """Figure 10a: write, then shift, then add. Fully serial. [DARTH] Sec
+        4.1 spells it out: "for a pipeline with N elements per vector register
+        and a depth of M, it would require N cycles to write followed by M
+        cycles to shift the data before the next set of partial products can
+        be written." Analog just stalls the whole time, since there's nowhere
+        to put its next partial product."""
         write = elements                      # one row of data per cycle
         total = 0
         stall = 0
@@ -201,15 +182,15 @@ class HybridComputeTile:
         return total, stall
 
     def _frontend_energy_pJ(self, cycles: int) -> float:
-        """Fetch/decode/issue, amortised over the tiles sharing one front end."""
+        """Fetch/decode/issue cost, split across the tiles sharing one front end."""
         ns = cycles / self.chip.clock_GHz
         return (FRONTEND_POWER_MW / self.chip.hcts_per_frontend) * ns
 
-    # -- digital-only path ----------------------------------------------
+    # pure-digital path, no analog involved at all
 
     def digital_op(self, op: str, width_bits: int = 8,
                    elements: int = 64) -> HCTCost:
-        """An operation with no analog component (ReLU, XOR, softmax, ...)."""
+        """Ops with no analog component -- ReLU, XOR, softmax, that kind of thing."""
         c = self.dce.op_cost(op, width_bits, elements)
         return HCTCost(
             cycles=c.latency_cycles,
