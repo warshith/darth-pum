@@ -380,6 +380,75 @@ cell\_bits & Tiles/instance & Throughput & Speedup & Accuracy \\
 \label{fig:precision}
 \end{figure}
 
+\subsection{Heterogeneous-memory HCT: the DCE on a different memory technology}
+
+The HCT's coordination layer, the shift unit, transpose unit, and arbiter,
+reasons only about cycle counts and bit depth; nothing in it reads what the
+underlying cell is physically made of. The ACE and DCE therefore need not
+share one memory technology simply because the paper builds them that way.
+The ACE cannot realistically move off ReRAM, since analog matrix-vector
+multiplication needs a cell with many distinguishable conductance levels, a
+ReRAM strength (on:off ratio $\sim$500:1) that STT-MRAM does not share
+($\sim$2:1). The DCE, however, only ever reads two states and is rewritten
+on nearly every active cycle, so endurance, not dynamic range, is what it
+actually needs, and STT-MRAM's endurance is commonly cited several orders of
+magnitude above ReRAM's.
+
+This swap rests on one premise worth stating plainly: RACER's digital PUM
+computes NOR gates inside the array through the device's own switching
+threshold ("stateful logic"), not through plain storage and readout. That
+mechanism has been demonstrated on STT-MTJ devices in simulation
+\cite{mramlogic}, which is what makes this a grounded proposal rather than a
+guess, though the same narrow resistance ratio that is fine for storage is a
+documented, open reliability question for computing this way. We measure
+the tradeoff assuming an equivalent logic scheme is realized on STT-MRAM.
+
+We made the \texttt{DCE} device model a parameter rather than a constant, so
+\texttt{DeviceParams.stt\_mram()} can stand in for the default ReRAM device
+with nothing else in the coordination layer changing. Switching energy and
+latency for the STT-MRAM option come from a real NVSim \cite{nvsim} run
+against its own shipped STT-RAM sample (22 nm, 8 MB, 512-bit word), not a
+literature guess: 538.3 pJ and 10.252 ns per 512-bit word, $\approx$1.05
+pJ/bit once array overhead is included. Endurance has no NVSim equivalent,
+since NVSim models timing, energy, and area, not wearout, so that figure
+stays a literature citation at $10^{12}$ writes.
+
+Table~\ref{tab:hetmem} and Fig.~\ref{fig:hetmem} show what this swap buys on
+ResNet-20's non-matrix-vector-multiply DCE operations (batch-norm folds,
+ReLU, residual adds), running back to back under an idealized even-wear
+assumption across the DCE's cells. The endurance gap is the whole point: one
+HCT's DCE on ReRAM reaches its cited endurance limit in about two weeks of
+continuous operation, while the same DCE on STT-MRAM lasts on the order of
+36{,}000 years. The honest cost is energy, not a small one: STT-MRAM's real,
+NVSim-measured switching energy is 82$\times$ ReRAM's per event. That cost
+stays contained to this bottom-up cross-check, though, since the chip's
+reported DCE power everywhere else in this report comes from the paper's
+Table 3 whole-element active power, dominated by pipeline control logic
+rather than per-switch energy, so this swap's real device-level cost does
+not move any other number in this report.
+
+\begin{table}[htbp]
+\caption{Heterogeneous-memory HCT: ReRAM vs. STT-MRAM DCE}
+\begin{center}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+ & ReRAM & STT-MRAM \\
+\midrule
+Switching energy & 0.0128 pJ & 1.05 pJ \\
+Endurance (cited) & $10^6$ writes & $10^{12}$ writes \\
+DCE lifetime, even wear & $\sim$0.04 yr & $\sim$36{,}200 yr \\
+\bottomrule
+\end{tabular}
+\label{tab:hetmem}
+\end{center}
+\end{table}
+
+\begin{figure}[htbp]
+\centerline{\includegraphics[width=\linewidth]{figs/heterogeneous_memory.pdf}}
+\caption{DCE lifetime and switching energy, ReRAM vs. STT-MRAM.}
+\label{fig:hetmem}
+\end{figure}
+
 \section{Conclusion}
 
 We reproduced the ResNet-20 workload of the DARTH-PUM architecture from its
@@ -388,14 +457,21 @@ CrossSim, that the original authors used, implementing the hybrid
 coordination layer that neither tool provides on its own. Our area model and
 ResNet-20 throughput/latency results land within 1\% of the paper, and we
 additionally measured CIFAR-10 accuracy under realistic device noise. On top
-of that we evaluated two small extensions. Row-level zero-skipping in the
+of that we evaluated three small extensions. Row-level zero-skipping in the
 ACE, driven by our model's own measured activation sparsity, reduces
 ResNet-20's analog energy by a modest but genuine margin. A
 precision/throughput tradeoff over how many bits an analog cell stores
 trades a real, substantial accuracy cost for up to 3.29$\times$ more
-throughput. Both numbers come from the full network rather than an isolated
-kernel or a back-of-envelope estimate, either of which would have looked
-considerably better than what the whole workload actually gains.
+throughput. These two numbers come from the full network rather than an
+isolated kernel or a back-of-envelope estimate, either of which would have
+looked considerably better than what the whole workload actually gains. A
+third, more speculative extension, a heterogeneous-memory HCT, asks whether
+the DCE needs to be built on ReRAM at all: parametrizing its device model and
+swapping in STT-MRAM, with energy and latency figures from a real NVSim run,
+shows a $10^6\times$
+endurance gain at an honest 82$\times$ energy cost per switching event, a
+tradeoff worth proposing precisely because we state its grounding assumption
+plainly rather than taking it for granted.
 
 \begin{thebibliography}{00}
 \bibitem{darthpum} R. Wong, B. Feinberg, and S. Ghose, ``DARTH-PUM: A Hybrid Processing-Using-Memory Architecture,'' in \emph{Proc. ASPLOS}, 2026, pp. 563-582.
@@ -407,6 +483,8 @@ considerably better than what the whole workload actually gains.
 \bibitem{resnet} K. He, X. Zhang, S. Ren, and J. Sun, ``Deep Residual Learning for Image Recognition,'' in \emph{Proc. CVPR}, 2016.
 \bibitem{isaac} A. Shafiee et al., ``ISAAC: A Convolutional Neural Network Accelerator with In-Situ Analog Arithmetic in Crossbars,'' in \emph{Proc. ISCA}, 2016.
 \bibitem{puma} A. Ankit et al., ``PUMA: A Programmable Ultra-efficient Memristor-Based Accelerator for Machine Learning Inference,'' in \emph{Proc. ASPLOS}, 2019.
+\bibitem{nvsim} X. Dong, C. Xu, Y. Xie, and N. P. Jouppi, ``NVSim: A Circuit-Level Performance, Energy, and Area Model for Emerging Nonvolatile Memory,'' \emph{IEEE Trans. Computer-Aided Design of Integrated Circuits and Systems}, vol. 31, no. 7, pp. 994-1007, July 2012.
+\bibitem{mramlogic} H. Mahmoudi, T. Windbacher, V. Sverdlov, and S. Selberherr, ``High Performance MRAM-Based Stateful Logic,'' in \emph{Proc. 15th Int. Conf. Ultimate Integration on Silicon (ULIS)}, Stockholm, Sweden, 2014.
 \end{thebibliography}
 
 \end{document}

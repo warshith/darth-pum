@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 from . import recipes
 from .area import POWER_MW
-from .device import DEVICE, ChipParams, DCEParams
+from .device import ChipParams, DCEParams
 
 
 @dataclass(frozen=True)
@@ -115,12 +115,21 @@ class DigitalComputeElement:
         mW = (POWER_MW["Array (Bool Ops)"] + POWER_MW["Pipeline Ctrl"]) * pipelines_busy
         return mW * 1e-3 * ns * 1e3  # mW*ns = nJ*1e-3 -> pJ
 
+    def switching_events(self, op: str, width_bits: int = 8, elements: int = 64) -> int:
+        """Raw count of cell-switching events `op` costs on `elements` values of
+        `width_bits` each -- only the micro-ops that actually drive current
+        (Boolean/transfer, not control). Device-independent: this is just
+        counting, the device only matters once you turn a count into energy
+        or wear. Used by switching_energy_pJ below and by the device-
+        portability extension's endurance estimate."""
+        rec = self.recipes[op]
+        return rec.switching_uops * width_bits * elements
+
     def switching_energy_pJ(
         self, op: str, width_bits: int = 8, elements: int = 64
     ) -> float:
-        """Bottom-up cross-check on _energy_pJ: count only the micro-ops that
-        actually drive current (Boolean/transfer, not control) and charge
-        device switching energy for each cell touched.
+        """Bottom-up cross-check on _energy_pJ: charge device switching energy
+        for every cell actually touched.
 
         Comes out ~20x below the Table 3 number, which is expected, not a bug
         -- this only counts dynamic switching, while Table 3 is whole-element
@@ -130,10 +139,13 @@ class DigitalComputeElement:
         vs 775 uW dynamic) that burns regardless of switching. So dynamic
         switching alone badly undercounts the real cost, which is why Table 3
         is what we actually report everywhere.
+
+        Reads self.p.device rather than one fixed constant, so this is also
+        the number that moves if the DCE is built on a different device (see
+        DeviceParams.stt_mram() and contribution/heterogeneous_memory.py).
         """
-        rec = self.recipes[op]
-        return (rec.switching_uops * width_bits * elements
-                * DEVICE.switch_energy_pJ)
+        return (self.switching_events(op, width_bits, elements)
+                * self.p.device.switch_energy_pJ)
 
     # convenience wrappers
 

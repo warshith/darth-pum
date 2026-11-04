@@ -37,6 +37,68 @@ class DeviceParams:
     tech_node_nm: int = 15
     """FreePDK 15 nm. [RACER] Section 7; [DARTH] Section 6 scales all area to 15 nm."""
 
+    endurance_writes: float = 1.0e6
+    """Write cycles before wearout. Commonly cited ReRAM range is ~1e6-1e9
+    depending on the cell; we use the conservative end. Only used by the
+    heterogeneous-memory extension (see contribution/heterogeneous_memory.py)
+    -- nothing in the main timing/energy model reads this."""
+
+    @staticmethod
+    def stt_mram() -> "DeviceParams":
+        """A second device option for the DCE, not the ACE: STT-MRAM only
+        has two resistance states (on:off ratio ~2x, nowhere near ReRAM's
+        500x), so it can't hold the multiple levels the ACE's multi-bit
+        analog storage needs. But digital PUM already only ever reads two
+        states, and endurance is the thing that actually matters for a
+        component this heavily switched -- STT-MRAM's is routinely cited
+        several orders of magnitude above ReRAM's.
+
+        Important caveat, not just a formality: RACER's digital PUM doesn't
+        just store and read bits, it computes NOR gates *inside* the array
+        via the device's own switching threshold ("stateful logic" --
+        MAGIC/IMPLY-style). That mechanism has been demonstrated on STT-MTJ
+        devices in simulation, but the same small resistance ratio that's
+        fine for plain storage is an open reliability problem for doing
+        logic this way: published work reports real HRS/LRS overlap and
+        read-disturb error rates that still need dedicated circuit work to
+        bring down. So this device swap is a proposed direction grounded in
+        real published attempts, not a settled, drop-in-safe claim -- we
+        measure what the tradeoff would look like assuming an equivalent
+        logic scheme is realized on MRAM, and say so plainly rather than
+        asserting it as fact. This is the device knob the heterogeneous-
+        memory extension turns -- the ACE keeps the chip's default ReRAM.
+
+        switch_energy_pJ / switch_latency_ns / on_off_ratio below are from a
+        real NVSim run (SEAL-UCSB/NVSim), not a hand-picked literature
+        guess: NVSim's own shipped sample_STTRAM.cell gives
+        ResistanceOn=3000ohm, ResistanceOff=6000ohm (on:off = 2.0x, even
+        tighter than we'd first assumed, which only reinforces the
+        reliability caveat above), SetEnergy=1pJ, SetPulse=10ns at the cell
+        level. Running that cell in NVSim's sample_STTRAM_cache.cfg (22nm,
+        8MB, 512-bit word) gives array-level write numbers -- 538.3 pJ and
+        10.252 ns per 512-bit word, i.e. ~1.05 pJ/bit once real array
+        overhead (decoders, mux, bitlines) is included, noticeably higher
+        than the bare per-cell SetEnergy, which is the honest array-level
+        number rather than the optimistic cell-level one. One more honest
+        gap: NVSim's shipped STT-RAM sample is a 22nm config, not the
+        chip's 15nm, since that's the sample NVSim ships -- tech_node_nm
+        below reflects what was actually simulated, not what we'd need for
+        an apples-to-apples node match.
+
+        endurance_writes has no NVSim equivalent -- NVSim models
+        timing/energy/area, not wearout, and grepping its source for
+        endurance/retention/wearout turns up nothing -- so that figure stays
+        a literature citation regardless: STT-MRAM endurance is commonly
+        reported several orders of magnitude above ReRAM's, we use a
+        representative value from that range."""
+        return DeviceParams(
+            switch_energy_pJ=1.05,
+            switch_latency_ns=10.25,
+            on_off_ratio=2.0,
+            tech_node_nm=22,
+            endurance_writes=1.0e12,
+        )
+
 
 # --------------------------------------------------------------------------
 # Array geometry
@@ -89,6 +151,15 @@ class DCEParams:
     buffer_write_cycles: int = 2
     """Writing a column into a buffer: cycle 1 presets to all-zero, cycle 2
     writes the 1s. [RACER] Section 4."""
+
+    device: DeviceParams = field(default_factory=DeviceParams)
+    """Which device backs this DCE's cells. Defaults to the chip's ReRAM.
+    The heterogeneous-memory extension swaps this for DeviceParams.stt_mram()
+    to measure what happens if the DCE (only the DCE -- the ACE needs
+    ReRAM's multi-level storage and stays put) were built on STT-MRAM
+    instead. Nothing else in this file changes when you do that; only the
+    switching-energy and endurance numbers that actually depend on the
+    underlying device respond."""
 
     @property
     def arrays(self) -> int:

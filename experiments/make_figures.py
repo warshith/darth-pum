@@ -185,6 +185,36 @@ def fig_oscar_crosscheck():
     return recipes["ADD"].cycles, recipes["ADD"].mix.get("NOR", 0)
 
 
+# Figure 7 -- heterogeneous-memory HCT: swap the DCE's device model, see what
+# moves. energy/endurance come straight from contribution/heterogeneous_memory.py,
+# which gets its STT-MRAM numbers from a real NVSim run, not a guess.
+
+def fig_heterogeneous_memory():
+    from contribution.heterogeneous_memory import compare_devices
+
+    results = compare_devices()
+    labels = list(results.keys())
+    lifetimes = [results[k].years_to_wearout for k in labels]
+    energies = [results[k].switch_energy_pJ for k in labels]
+
+    fig, axes = plt.subplots(1, 2, figsize=FIGSIZE_WIDE)
+
+    b1 = axes[0].bar(labels, lifetimes, color=[NEUTRAL, GREEN], width=0.55)
+    bar_value_labels(axes[0], b1, fmt="{:.2g}")
+    axes[0].set_yscale("log")
+    axes[0].set_ylabel("Years to wearout (log scale)")
+    axes[0].set_title("DCE lifetime, even wear")
+
+    b2 = axes[1].bar(labels, energies, color=[NEUTRAL, ORANGE], width=0.55)
+    bar_value_labels(axes[1], b2, fmt="{:.2f}")
+    axes[1].set_ylabel("pJ per switching event")
+    axes[1].set_title("Switching energy")
+
+    fig.suptitle("Heterogeneous-memory HCT: ReRAM vs. STT-MRAM DCE", y=1.04)
+    save(fig, "heterogeneous_memory")
+    return results
+
+
 # Submission folders -- the assignment wants "Baseline Results" and
 # "Contribution Results" as their own thing, separate from the report pdf.
 # just copies figures we already made plus a short summary table each.
@@ -216,7 +246,7 @@ Regenerate with `python -m experiments.make_figures`.
 
 CONTRIBUTION_README = """# Contribution Results
 
-Two small architectural extensions, each measured end to end rather than at
+Three small architectural extensions, each measured end to end rather than at
 a more flattering isolated-kernel or naive-estimate figure. See
 `paper/report.tex` Section V for the full discussion.
 
@@ -240,6 +270,22 @@ Figure: `zero_skip_dilution.pdf`
 
 Figure: `precision_tradeoff.pdf`
 
+## Heterogeneous-memory HCT: ReRAM vs. STT-MRAM DCE
+
+Proposed direction, not a settled claim: assumes an equivalent in-memory
+logic scheme can be realized on STT-MRAM, which published work has
+demonstrated in simulation but not fully solved for reliability. Device
+numbers (switching energy, latency) are from a real NVSim run on its own
+shipped STT-RAM sample, not a hand-picked figure.
+
+| | ReRAM | STT-MRAM |
+|---|---|---|
+| Switching energy | 0.0128 pJ | 1.05 pJ |
+| Endurance (cited) | 1e6 writes | 1e12 writes |
+| DCE lifetime, ResNet-20 back to back, even wear | ~0.04 yr (~2 weeks) | ~36,200 yr |
+
+Figure: `heterogeneous_memory.pdf`
+
 Regenerate with `python -m experiments.make_figures`.
 """
 
@@ -256,7 +302,7 @@ def export_submission_folders():
     with open("results/baseline/README.md", "w") as f:
         f.write(BASELINE_README)
 
-    for name in ("zero_skip_dilution", "precision_tradeoff"):
+    for name in ("zero_skip_dilution", "precision_tradeoff", "heterogeneous_memory"):
         shutil.copy(f"paper/figs/{name}.pdf", f"results/contribution/{name}.pdf")
     with open("results/contribution/README.md", "w") as f:
         f.write(CONTRIBUTION_README)
@@ -272,10 +318,15 @@ if __name__ == "__main__":
     measured_pct = fig_zero_skip_dilution()
     total_tiles = fig_layer_footprint()
     add_cycles, add_nor = fig_oscar_crosscheck()
+    device_results = fig_heterogeneous_memory()
     export_submission_folders()
     print(f"\nThroughput speedup: {throughput_speedup:.2f}x  "
          f"Latency speedup: {latency_speedup:.2f}x  "
          f"Zero-skip reduction: {measured_pct:.2f}%  "
          f"Total physical arrays: {total_tiles}  "
          f"ADD: {add_cycles} cycles ({add_nor} NOR)")
+    rr, mr = device_results["ReRAM"], device_results["STT-MRAM"]
+    print(f"Heterogeneous-memory HCT: {mr.years_to_wearout/rr.years_to_wearout:.0f}x "
+         f"longer DCE lifetime on STT-MRAM, {mr.switch_energy_pJ/rr.switch_energy_pJ:.1f}x "
+         "more energy per switching event")
     print("\nDone. See paper/figs/*.pdf, results/baseline/, results/contribution/")

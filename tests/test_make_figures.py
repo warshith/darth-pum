@@ -34,6 +34,14 @@ def test_oscar_crosscheck_matches_the_parsed_add_recipe():
     assert add_nor == 16
 
 
+def test_heterogeneous_memory_figure_matches_the_investigated_value():
+    from experiments.make_figures import fig_heterogeneous_memory
+    results = fig_heterogeneous_memory()
+    rr, mr = results["ReRAM"], results["STT-MRAM"]
+    assert mr.years_to_wearout / rr.years_to_wearout == pytest.approx(1e6, rel=0.02)
+    assert mr.switch_energy_pJ / rr.switch_energy_pJ == pytest.approx(82.0, rel=0.02)
+
+
 def test_all_figures_are_written(tmp_path, monkeypatch):
     """Smoke test -- every figure function runs end to end and actually writes a PDF."""
     monkeypatch.chdir(tmp_path)
@@ -49,10 +57,11 @@ def test_all_figures_are_written(tmp_path, monkeypatch):
     mf.fig_zero_skip_dilution()
     mf.fig_layer_footprint()
     mf.fig_oscar_crosscheck()
+    mf.fig_heterogeneous_memory()
 
     for name in ("reproduction_summary", "resnet20_accuracy",
                 "precision_tradeoff", "zero_skip_dilution",
-                "layer_footprint", "oscar_crosscheck"):
+                "layer_footprint", "oscar_crosscheck", "heterogeneous_memory"):
         assert (tmp_path / "paper" / "figs" / f"{name}.pdf").exists()
 
 
@@ -73,6 +82,7 @@ def test_submission_folders_get_the_right_figures(tmp_path, monkeypatch):
     mf.fig_zero_skip_dilution()
     mf.fig_layer_footprint()
     mf.fig_oscar_crosscheck()
+    mf.fig_heterogeneous_memory()
     mf.export_submission_folders()
 
     for name in ("reproduction_summary", "resnet20_accuracy",
@@ -80,6 +90,6 @@ def test_submission_folders_get_the_right_figures(tmp_path, monkeypatch):
         assert (tmp_path / "results" / "baseline" / f"{name}.pdf").exists()
     assert (tmp_path / "results" / "baseline" / "README.md").exists()
 
-    for name in ("zero_skip_dilution", "precision_tradeoff"):
+    for name in ("zero_skip_dilution", "precision_tradeoff", "heterogeneous_memory"):
         assert (tmp_path / "results" / "contribution" / f"{name}.pdf").exists()
     assert (tmp_path / "results" / "contribution" / "README.md").exists()
